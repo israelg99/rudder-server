@@ -40,6 +40,7 @@ import (
 	"github.com/rudderlabs/rudder-server/utils/bytesize"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
+	"github.com/rudderlabs/rudder-server/utils/pubsub"
 	utilTypes "github.com/rudderlabs/rudder-server/utils/types"
 )
 
@@ -2262,8 +2263,21 @@ func (rt *HandleT) Shutdown() {
 
 func (rt *HandleT) backendConfigSubscriber() {
 	ch := rt.backendConfig.Subscribe(context.TODO(), backendconfig.TopicBackendConfig)
+	blockSubscriber := make(chan struct{})
 	for configEvent := range ch {
-		rt.configSubscriberLock.Lock()
+		if configEvent.Data != nil {
+			go func(blockChan chan struct{}) {
+				blockChan <- struct{}{}
+			}(blockSubscriber)
+		}
+		rt.updateDestinationsMap(configEvent, blockSubscriber)
+	}
+}
+
+func (rt *HandleT) updateDestinationsMap(configEvent pubsub.DataEvent, blockSubscriber chan struct{}) {
+	rt.configSubscriberLock.Lock()
+	defer rt.configSubscriberLock.Unlock()
+	if configEvent.Data != nil {
 		rt.destinationsMap = map[string]*routerutils.BatchDestinationT{}
 		allSources := configEvent.Data.(backendconfig.ConfigT)
 		rt.sourceIDWorkspaceMap = map[string]string{}
@@ -2296,8 +2310,8 @@ func (rt *HandleT) backendConfigSubscriber() {
 			rt.isBackendConfigInitialized = true
 			rt.backendConfigInitialized <- true
 		}
-		rt.configSubscriberLock.Unlock()
 	}
+	<-blockSubscriber
 }
 
 func (rt *HandleT) HandleOAuthDestResponse(params *HandleDestOAuthRespParamsT) (int, string) {
