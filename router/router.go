@@ -2264,12 +2264,17 @@ func (rt *HandleT) Shutdown() {
 func (rt *HandleT) backendConfigSubscriber() {
 	ch := rt.backendConfig.Subscribe(context.TODO(), backendconfig.TopicBackendConfig)
 	blockSubscriber := make(chan struct{})
+	var prevConfig pubsub.DataEvent
 	for configEvent := range ch {
 		if configEvent.Data != nil {
-			go func(blockChan chan struct{}) {
+			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-			}(blockSubscriber)
+				if prevConfig.Topic != "" && prevConfig.Data == nil {
+					blockChan <- struct{}{}
+				}
+			}(blockSubscriber, prevConfig)
 		}
+		prevConfig = configEvent
 		rt.updateDestinationsMap(configEvent, blockSubscriber)
 	}
 }

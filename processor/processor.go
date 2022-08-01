@@ -599,12 +599,20 @@ func SetFeaturesRetryAttempts(overrideAttempts int) {
 func (proc *HandleT) backendConfigSubscriber() {
 	ch := proc.backendConfig.Subscribe(context.TODO(), backendconfig.TopicProcessConfig)
 	blockSubscriber := make(chan struct{})
+	var prevConfig pubsub.DataEvent
 	for config := range ch {
 		if config.Data != nil {
-			go func(blockChan chan struct{}) {
+			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-			}(blockSubscriber)
+				// when connection to control plane is established again
+				// the above send unblocks the previous blockChan read
+				// the send below ublocks the next blockChan read
+				if prevConfig.Topic != "" && prevConfig.Data == nil { // differentiating startup and a running server
+					blockChan <- struct{}{}
+				}
+			}(blockSubscriber, prevConfig)
 		}
+		prevConfig = config
 		proc.updateConfigMaps(config, blockSubscriber)
 	}
 }

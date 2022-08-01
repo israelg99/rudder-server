@@ -171,13 +171,18 @@ type JobParametersT struct {
 func (brt *HandleT) backendConfigSubscriber() {
 	ch := brt.backendConfig.Subscribe(context.TODO(), backendconfig.TopicBackendConfig)
 	blockSubscriber := make(chan struct{})
+	var prevConfig pubsub.DataEvent
 	for {
 		config := <-ch
 		if config.Data != nil {
-			go func(blockChan chan struct{}) {
+			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-			}(blockSubscriber)
+				if prevConfig.Topic != "" && prevConfig.Data == nil {
+					blockChan <- struct{}{}
+				}
+			}(blockSubscriber, prevConfig)
 		}
+		prevConfig = config
 		brt.updateDestinationsMap(config, blockSubscriber)
 	}
 }
