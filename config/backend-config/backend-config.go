@@ -134,6 +134,11 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 	if err != nil {
 		statConfigBackendError.Increment()
 		pkgLogger.Warnf("Error fetching config from backend: %v", err)
+		// fetchFromConfig and publish -> if cache-fetch fails -> then proceed as below
+		// if cache-fetch succeeds -> send it to only GW(GW subscription topic to be changed)
+		// publish nil to all others (proc, rt, brt)
+		// publish only once and stop
+		// get back to publishing once control plane is back up
 		return
 	}
 
