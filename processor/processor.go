@@ -617,7 +617,7 @@ func (proc *HandleT) backendConfigSubscriber() {
 	}
 }
 
-func (proc *HandleT) updateConfigMaps(config pubsub.DataEvent, blockSubscriber chan struct{}) {
+func (*HandleT) updateConfigMaps(config pubsub.DataEvent, blockSubscriber chan struct{}) {
 	configSubscriberLock.Lock()
 	defer configSubscriberLock.Unlock()
 	if config.Data != nil {

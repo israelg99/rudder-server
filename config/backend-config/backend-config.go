@@ -139,6 +139,15 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		// publish nil to all others (proc, rt, brt)
 		// publish only once and stop
 		// get back to publishing once control plane is back up
+		config, cacheErr := getCachedConfig()
+		if cacheErr == nil {
+			filteredConfig := filterProcessorEnabledDestinations(config)
+			bc.eb.Publish(string(TopicGatewayConfig), filteredConfig)
+			bc.eb.Publish(string(TopicBackendConfig), nil)
+			bc.eb.Publish(string(TopicProcessConfig), nil)
+		} else {
+			pkgLogger.Errorf("Error fetching cached config: %v", cacheErr)
+		}
 		return
 	}
 
@@ -158,8 +167,7 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		LastSync = time.Now().Format(time.RFC3339) // TODO fix concurrent access
 		bc.eb.Publish(string(TopicBackendConfig), sourceJSON)
 		bc.eb.Publish(string(TopicProcessConfig), filteredSourcesJSON)
-	} else {
-		bc.curSourceJSONLock.Unlock()
+		bc.eb.Publish(string(TopicGatewayConfig), filteredSourcesJSON)
 	}
 
 	bc.initializedLock.Lock()

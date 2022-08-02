@@ -1470,9 +1470,13 @@ func (gateway *HandleT) StartAdminHandler(ctx context.Context) error {
 	return g.Wait()
 }
 
+func (gateway *HandleT) cacheBackendConfig() {
+	gateway.backendConfig.Cache()
+}
+
 // Gets the config from config backend and extracts enabled writekeys
 func (gateway *HandleT) backendConfigSubscriber() {
-	ch := gateway.backendConfig.Subscribe(context.TODO(), backendconfig.TopicProcessConfig)
+	ch := gateway.backendConfig.Subscribe(context.TODO(), backendconfig.TopicGatewayConfig)
 	for config := range ch {
 		configSubscriberLock.Lock()
 		writeKeysSourceMap = map[string]backendconfig.SourceT{}
@@ -1620,6 +1624,9 @@ func (gateway *HandleT) Setup(
 
 	rruntime.Go(func() {
 		gateway.backendConfigSubscriber()
+	})
+	rruntime.Go(func() {
+		gateway.cacheBackendConfig()
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
