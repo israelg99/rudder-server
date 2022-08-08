@@ -93,19 +93,21 @@ func (handle *HandleT) setup(beConfigHandle backendconfig.BackendConfig) {
 	ch := beConfigHandle.Subscribe(context.TODO(), backendconfig.TopicBackendConfig)
 
 	for beconfig := range ch {
-		sources := beconfig.Data.(backendconfig.ConfigT)
-		handle.workspaceIDForSourceIDMapLock.Lock()
-		if sources.WorkspaceID == "" {
-			handle.workspaceIDForSourceIDMap = make(map[string]string)
-			for _, source := range sources.Sources {
-				if _, ok := handle.workspaceIDForSourceIDMap[source.ID]; !ok {
-					handle.workspaceIDForSourceIDMap[source.ID] = source.WorkspaceID
+		sources, ok := beconfig.Data.(backendconfig.ConfigT)
+		if ok {
+			handle.workspaceIDForSourceIDMapLock.Lock()
+			if sources.WorkspaceID == "" {
+				handle.workspaceIDForSourceIDMap = make(map[string]string)
+				for _, source := range sources.Sources {
+					if _, ok := handle.workspaceIDForSourceIDMap[source.ID]; !ok {
+						handle.workspaceIDForSourceIDMap[source.ID] = source.WorkspaceID
+					}
 				}
+			} else {
+				handle.workspaceID = sources.WorkspaceID
 			}
-		} else {
-			handle.workspaceID = sources.WorkspaceID
+			handle.workspaceIDForSourceIDMapLock.Unlock()
 		}
-		handle.workspaceIDForSourceIDMapLock.Unlock()
 	}
 }
 
