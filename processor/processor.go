@@ -604,16 +604,15 @@ func (proc *HandleT) backendConfigSubscriber() {
 		if config.Data != nil {
 			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-				// when connection to control plane is established again
-				// the above send unblocks the previous blockChan read
-				// the send below ublocks the next blockChan read
-				if prevConfig.Topic != "" && prevConfig.Data == nil { // differentiating startup and a running server
-					blockChan <- struct{}{}
+				if prevConfig.Data == nil {
+					if prevConfig.Topic != "" { // not startup -> one more send to unblock previous updateConfigMaps()
+						blockChan <- struct{}{}
+					}
 				}
 			}(blockSubscriber, prevConfig)
 		}
+		go proc.updateConfigMaps(config, blockSubscriber)
 		prevConfig = config
-		proc.updateConfigMaps(config, blockSubscriber)
 	}
 }
 

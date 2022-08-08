@@ -2269,13 +2269,15 @@ func (rt *HandleT) backendConfigSubscriber() {
 		if configEvent.Data != nil {
 			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-				if prevConfig.Topic != "" && prevConfig.Data == nil {
-					blockChan <- struct{}{}
+				if prevConfig.Data == nil {
+					if prevConfig.Topic != "" {
+						blockChan <- struct{}{}
+					}
 				}
 			}(blockSubscriber, prevConfig)
 		}
+		go rt.updateDestinationsMap(configEvent, blockSubscriber)
 		prevConfig = configEvent
-		rt.updateDestinationsMap(configEvent, blockSubscriber)
 	}
 }
 

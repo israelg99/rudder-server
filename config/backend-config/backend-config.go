@@ -71,6 +71,8 @@ type backendConfigImpl struct {
 	initialized       bool
 	curSourceJSON     ConfigT
 	curSourceJSONLock sync.RWMutex
+	cacheLock         sync.RWMutex
+	usingCache        bool
 }
 
 func loadConfig() {
@@ -140,11 +142,29 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		// publish only once and stop
 		// get back to publishing once control plane is back up
 		config, cacheErr := getCachedConfig()
+		bc.curSourceJSONLock.Lock()
+		bc.curSourceJSON = config
+		bc.curSourceJSONLock.Unlock()
+		bc.cacheLock.Lock()
+		defer bc.cacheLock.Unlock()
 		if cacheErr == nil {
-			filteredConfig := filterProcessorEnabledDestinations(config)
-			bc.eb.Publish(string(TopicGatewayConfig), filteredConfig)
-			bc.eb.Publish(string(TopicBackendConfig), nil)
-			bc.eb.Publish(string(TopicProcessConfig), nil)
+			if !bc.usingCache {
+				bc.eb.Publish(
+					string(TopicGatewayConfig),
+					filterProcessorEnabledDestinations(config),
+				)
+				bc.eb.Publish(string(TopicBackendConfig), nil)
+				bc.eb.Publish(string(TopicProcessConfig), nil)
+
+				bc.initializedLock.Lock()
+				defer bc.initializedLock.Unlock()
+				bc.usingCache = true
+				if !bc.initialized {
+					bc.initialized = true
+				}
+			} else {
+				pkgLogger.Info("already using cache, not publishing")
+			}
 		} else {
 			pkgLogger.Errorf("Error fetching cached config: %v", cacheErr)
 		}
@@ -170,9 +190,14 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		bc.eb.Publish(string(TopicGatewayConfig), filteredSourcesJSON)
 	}
 
+	bc.cacheLock.Lock()
+	defer bc.cacheLock.Unlock()
 	bc.initializedLock.Lock()
-	bc.initialized = true
-	bc.initializedLock.Unlock()
+	defer bc.initializedLock.Unlock()
+	bc.usingCache = false
+	if !bc.initialized {
+		bc.initialized = true
+	}
 }
 
 func (bc *backendConfigImpl) pollConfigUpdate(ctx context.Context, workspaces string) {

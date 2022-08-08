@@ -177,13 +177,15 @@ func (brt *HandleT) backendConfigSubscriber() {
 		if config.Data != nil {
 			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
 				blockChan <- struct{}{}
-				if prevConfig.Topic != "" && prevConfig.Data == nil {
-					blockChan <- struct{}{}
+				if prevConfig.Data == nil {
+					if prevConfig.Topic != "" {
+						blockChan <- struct{}{}
+					}
 				}
 			}(blockSubscriber, prevConfig)
 		}
 		prevConfig = config
-		brt.updateDestinationsMap(config, blockSubscriber)
+		go brt.updateDestinationsMap(config, blockSubscriber)
 	}
 }
 
