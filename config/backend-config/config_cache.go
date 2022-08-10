@@ -2,84 +2,126 @@ package backendconfig
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
+	"time"
 
-	"github.com/rudderlabs/rudder-server/utils/misc"
+	"github.com/rudderlabs/rudder-server/jobsdb"
+)
+
+var (
+	db       *sql.DB
+	cacheTTL time.Duration
 )
 
 // new goroutine here to cache the config
-func Cache() {
-	ch := backendConfig.Subscribe(context.TODO(), TopicProcessConfig)
+func cache(ctx context.Context, workspaces string) {
+	var err error
+	// setup db connection
+	db, err = setupDBConn()
+	if err != nil {
+		pkgLogger.Errorf("failed to setup db: %v", err)
+		return
+	}
+	defer db.Close()
+
+	// clear old config periodically
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute * 5):
+				clearOldConfig(db)
+			}
+		}
+	}()
+
+	// subscribe to config and write to db
+	ch := backendConfig.Subscribe(ctx, TopicProcessConfig)
 	for config := range ch {
-		cachedConfig := ConfigT{}
-		if config.Data != nil {
-			sources := config.Data.(ConfigT)
-			for _, source := range sources.Sources {
-				cachedConfig.Sources = append(cachedConfig.Sources, SourceT{
-					ID:               source.ID,
-					Name:             source.Name,
-					WorkspaceID:      source.WorkspaceID,
-					WriteKey:         source.WriteKey,
-					Enabled:          source.Enabled,
-					SourceDefinition: source.SourceDefinition,
-				})
-			}
-			// persist to database
-			configBytes, err := json.Marshal(cachedConfig)
-			if err != nil {
-				panic(err)
-			}
-			writeToFile(configBytes)
+		// persist to database
+		configBytes, err := json.Marshal(config)
+		if err != nil {
+			pkgLogger.Errorf("failed to marshal config: %v", err)
+		}
+		err = writeToFile(ctx, configBytes, db, workspaces)
+		if err != nil {
+			pkgLogger.Errorf("failed writing config to database: %v", err)
 		}
 	}
 }
 
-// write the config to a file
-func writeToFile(configBytes []byte) {
-	// write to file
-	localTmpDirName := "/rudder-config-cache/"
-	tmpDirPath, err := misc.CreateTMPDIR()
-	if err != nil {
-		panic(err)
-	}
-	jsonPath := fmt.Sprintf("%v%v.json", tmpDirPath+localTmpDirName, `config`)
-
-	err = os.MkdirAll(filepath.Dir(jsonPath), os.ModePerm)
-	if err != nil {
-		panic(err)
-	}
-	jsonFile, err := os.Create(jsonPath)
-	if err != nil {
-		panic(err)
-	}
-	defer jsonFile.Close()
-	_, err = jsonFile.Write(configBytes)
-	if err != nil {
-		panic(err)
-	}
+// Write the config to the database
+func writeToFile(ctx context.Context, configBytes []byte, db *sql.DB, workspaces string) error {
+	// write to config table
+	_, err := db.ExecContext(
+		ctx,
+		`INSERT INTO config_cache (workspaces, config) VALUES ($1, pgp_sym_encrypt($2, $3))`,
+		workspaces,
+		configBytes,
+		DefaultBackendConfig.AccessToken(),
+	)
+	return err
 }
 
-// another method to fetch the cached config when needed
-func getCachedConfig() (ConfigT, error) {
-	// read from file
-	localTmpDirName := "/rudder-config-cache/"
-	tmpDirPath, err := misc.CreateTMPDIR()
+// Fetch the cached config when needed
+func getCachedConfig(ctx context.Context, workspaces string) (ConfigT, error) {
+	// read from database
+	var config ConfigT
+	var configBytes []byte
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2 order by created_at desc limit 1`,
+		DefaultBackendConfig.AccessToken(),
+		workspaces,
+	).Scan(&configBytes)
 	if err != nil {
-		panic(err)
+		return config, err
 	}
-	jsonPath := fmt.Sprintf("%v%v.json", tmpDirPath+localTmpDirName, `config`)
-	jsonFile, err := os.Open(jsonPath)
+	err = json.Unmarshal(configBytes, &config)
 	if err != nil {
-		return ConfigT{}, err
+		return config, err
 	}
-	defer jsonFile.Close()
-	var cachedConfig ConfigT
-	err = json.NewDecoder(jsonFile).Decode(&cachedConfig)
+	return config, nil
+}
+
+// setupDBConn sets up the database connection, creates the config table if it doesn't exist
+func setupDBConn() (*sql.DB, error) {
+	psqlInfo := jobsdb.GetConnectionString()
+	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
-		return ConfigT{}, err
+		pkgLogger.Errorf("failed to open db: %v", err)
+		return nil, err
 	}
-	return cachedConfig, nil
+	err = db.Ping()
+	if err != nil {
+		pkgLogger.Errorf("failed to ping db: %v", err)
+		return nil, err
+	}
+	// create table if it doesn't exist
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS config_cache (
+		id SERIAL PRIMARY KEY,
+		workspaces TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		config bytea NOT NULL
+	)`)
+	if err != nil {
+		pkgLogger.Errorf("failed to create table: %v", err)
+		return nil, err
+	}
+	// create encryption extension pgcrypto
+	_, err = db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
+	if err != nil {
+		pkgLogger.Errorf("failed to create extension: %v", err)
+		return nil, err
+	}
+	return db, nil
+}
+
+func clearOldConfig(db *sql.DB) {
+	_, err := db.Exec(`DELETE FROM config_cache WHERE created_at < NOW() - INTERVAL '5 minutes'`)
+	if err != nil {
+		pkgLogger.Errorf("failed to delete old config: %v", err)
+	}
 }

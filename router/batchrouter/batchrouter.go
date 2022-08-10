@@ -42,7 +42,6 @@ import (
 	"github.com/rudderlabs/rudder-server/utils/bytesize"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
-	"github.com/rudderlabs/rudder-server/utils/pubsub"
 	"github.com/rudderlabs/rudder-server/utils/types"
 	warehouseutils "github.com/rudderlabs/rudder-server/warehouse/utils"
 	"github.com/tidwall/gjson"
@@ -170,29 +169,9 @@ type JobParametersT struct {
 
 func (brt *HandleT) backendConfigSubscriber() {
 	ch := brt.backendConfig.Subscribe(context.TODO(), backendconfig.TopicBackendConfig)
-	blockSubscriber := make(chan struct{})
-	var prevConfig pubsub.DataEvent
 	for {
 		config := <-ch
-		if config.Data != nil {
-			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
-				blockChan <- struct{}{}
-				if prevConfig.Data == nil {
-					if prevConfig.Topic != "" {
-						blockChan <- struct{}{}
-					}
-				}
-			}(blockSubscriber, prevConfig)
-		}
-		prevConfig = config
-		go brt.updateDestinationsMap(config, blockSubscriber)
-	}
-}
-
-func (brt *HandleT) updateDestinationsMap(config pubsub.DataEvent, blockSubscriber chan struct{}) {
-	brt.configSubscriberLock.Lock()
-	defer brt.configSubscriberLock.Unlock()
-	if config.Data != nil {
+		brt.configSubscriberLock.Lock()
 		brt.destinationsMap = map[string]*router_utils.BatchDestinationT{}
 		brt.connectionWHNamespaceMap = map[string]string{}
 		allSources := config.Data.(backendconfig.ConfigT)
@@ -235,8 +214,8 @@ func (brt *HandleT) updateDestinationsMap(config pubsub.DataEvent, blockSubscrib
 			brt.isBackendConfigInitialized = true
 			brt.backendConfigInitialized <- true
 		}
+		brt.configSubscriberLock.Unlock()
 	}
-	<-blockSubscriber
 }
 
 type batchRequestMetric struct {

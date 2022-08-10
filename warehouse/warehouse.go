@@ -1200,7 +1200,7 @@ func monitorDestRouters(ctx context.Context) {
 
 func onConfigDataEvent(config pubsub.DataEvent, dstToWhRouter map[string]*HandleT) {
 	pkgLogger.Debug("Got config from config-backend", config)
-	sources, _ := config.Data.(backendconfig.ConfigT)
+	sources := config.Data.(backendconfig.ConfigT)
 	enabledDestinations := make(map[string]bool)
 	for _, source := range sources.Sources {
 		for _, destination := range source.Destinations {

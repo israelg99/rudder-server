@@ -43,7 +43,6 @@ import (
 	"github.com/rudderlabs/rudder-server/utils/bytesize"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
-	"github.com/rudderlabs/rudder-server/utils/pubsub"
 	"github.com/rudderlabs/rudder-server/utils/types"
 )
 
@@ -598,28 +597,8 @@ func SetFeaturesRetryAttempts(overrideAttempts int) {
 
 func (proc *HandleT) backendConfigSubscriber() {
 	ch := proc.backendConfig.Subscribe(context.TODO(), backendconfig.TopicProcessConfig)
-	blockSubscriber := make(chan struct{})
-	var prevConfig pubsub.DataEvent
 	for config := range ch {
-		if config.Data != nil {
-			go func(blockChan chan struct{}, prevConfig pubsub.DataEvent) {
-				blockChan <- struct{}{}
-				if prevConfig.Data == nil {
-					if prevConfig.Topic != "" { // not startup -> one more send to unblock previous updateConfigMaps()
-						blockChan <- struct{}{}
-					}
-				}
-			}(blockSubscriber, prevConfig)
-		}
-		go proc.updateConfigMaps(config, blockSubscriber)
-		prevConfig = config
-	}
-}
-
-func (*HandleT) updateConfigMaps(config pubsub.DataEvent, blockSubscriber chan struct{}) {
-	configSubscriberLock.Lock()
-	defer configSubscriberLock.Unlock()
-	if config.Data != nil {
+		configSubscriberLock.Lock()
 		writeKeyDestinationMap = make(map[string][]backendconfig.DestinationT)
 		writeKeySourceMap = map[string]backendconfig.SourceT{}
 		destinationIDtoTypeMap = make(map[string]string)
@@ -635,8 +614,8 @@ func (*HandleT) updateConfigMaps(config pubsub.DataEvent, blockSubscriber chan s
 				}
 			}
 		}
+		configSubscriberLock.Unlock()
 	}
-	<-blockSubscriber
 }
 
 func getSourceByWriteKey(writeKey string) (*backendconfig.SourceT, error) {

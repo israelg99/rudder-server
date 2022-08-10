@@ -131,44 +131,32 @@ func filterProcessorEnabledDestinations(config ConfigT) ConfigT {
 	return modifiedConfig
 }
 
-func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackendError stats.RudderStats, workspaces string) {
-	sourceJSON, err := bc.workspaceConfig.Get(ctx, workspaces)
+func (bc *CommonBackendConfig) configUpdate(ctx context.Context, statConfigBackendError stats.RudderStats, workspaces string) {
+	var (
+		sourceJSON ConfigT
+		err        error
+	)
+	sourceJSON, err = backendConfig.Get(ctx, workspaces)
 	if err != nil {
 		statConfigBackendError.Increment()
 		pkgLogger.Warnf("Error fetching config from backend: %v", err)
-		// fetchFromConfig and publish -> if cache-fetch fails -> then proceed as below
-		// if cache-fetch succeeds -> send it to only GW(GW subscription topic to be changed)
-		// publish nil to all others (proc, rt, brt)
-		// publish only once and stop
-		// get back to publishing once control plane is back up
-		config, cacheErr := getCachedConfig()
-		bc.curSourceJSONLock.Lock()
-		bc.curSourceJSON = config
-		bc.curSourceJSONLock.Unlock()
-		bc.cacheLock.Lock()
-		defer bc.cacheLock.Unlock()
-		if cacheErr == nil {
-			if !bc.usingCache {
-				bc.eb.Publish(
-					string(TopicGatewayConfig),
-					filterProcessorEnabledDestinations(config),
-				)
-				bc.eb.Publish(string(TopicBackendConfig), nil)
-				bc.eb.Publish(string(TopicProcessConfig), nil)
 
-				bc.initializedLock.Lock()
-				defer bc.initializedLock.Unlock()
-				bc.usingCache = true
-				if !bc.initialized {
-					bc.initialized = true
-				}
-			} else {
-				pkgLogger.Info("already using cache, not publishing")
+		if !bc.usingCache {
+			var cacheErr error
+			sourceJSON, cacheErr = getCachedConfig(ctx, workspaces)
+			if cacheErr != nil {
+				pkgLogger.Warnf("Error fetching config from cache: %v", cacheErr)
+				return
 			}
+			bc.usingCache = true
 		} else {
-			pkgLogger.Errorf("Error fetching cached config: %v", cacheErr)
+			pkgLogger.Info("Using cache already")
+			return
 		}
-		return
+	} else {
+		if bc.usingCache {
+			bc.usingCache = false
+		}
 	}
 
 	// sorting the sourceJSON.
@@ -187,17 +175,11 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		LastSync = time.Now().Format(time.RFC3339) // TODO fix concurrent access
 		bc.eb.Publish(string(TopicBackendConfig), sourceJSON)
 		bc.eb.Publish(string(TopicProcessConfig), filteredSourcesJSON)
-		bc.eb.Publish(string(TopicGatewayConfig), filteredSourcesJSON)
 	}
 
-	bc.cacheLock.Lock()
-	defer bc.cacheLock.Unlock()
 	bc.initializedLock.Lock()
-	defer bc.initializedLock.Unlock()
-	bc.usingCache = false
-	if !bc.initialized {
-		bc.initialized = true
-	}
+	bc.initialized = true
+	bc.initializedLock.Unlock()
 }
 
 func (bc *backendConfigImpl) pollConfigUpdate(ctx context.Context, workspaces string) {
@@ -299,6 +281,13 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 		bc.pollConfigUpdate(ctx, workspaces)
 		close(bc.blockChan)
 	})
+	rruntime.Go(func() {
+		bc.Cache(ctx, workspaces)
+	})
+}
+
+func (bc *backendConfigImpl) Cache(ctx context.Context, workspaces string) {
+	cache(ctx, workspaces)
 }
 
 func (bc *backendConfigImpl) Stop() {

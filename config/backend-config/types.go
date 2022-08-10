@@ -16,8 +16,6 @@ const (
 	/*TopicProcessConfig topic provides updates on backend config of processor enabled destinations, via Subscribe function */
 	TopicProcessConfig Topic = "processConfig"
 
-	TopicGatewayConfig Topic = "gatewayConfig"
-
 	/*RegulationSuppress refers to Suppress Regulation */
 	RegulationSuppress Regulation = "Suppress"
 
