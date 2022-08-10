@@ -4,14 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"time"
 
 	"github.com/rudderlabs/rudder-server/jobsdb"
 )
 
 var (
-	db       *sql.DB
-	cacheTTL time.Duration
+	db *sql.DB
 )
 
 // new goroutine here to cache the config
@@ -25,18 +23,6 @@ func cache(ctx context.Context, workspaces string) {
 	}
 	defer db.Close()
 
-	// clear old config periodically
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Minute * 5):
-				clearOldConfig(db)
-			}
-		}
-	}()
-
 	// subscribe to config and write to db
 	ch := backendConfig.Subscribe(ctx, TopicProcessConfig)
 	for config := range ch {
@@ -45,15 +31,15 @@ func cache(ctx context.Context, workspaces string) {
 		if err != nil {
 			pkgLogger.Errorf("failed to marshal config: %v", err)
 		}
-		err = writeToFile(ctx, configBytes, db, workspaces)
+		err = persistConfig(ctx, configBytes, db, workspaces)
 		if err != nil {
 			pkgLogger.Errorf("failed writing config to database: %v", err)
 		}
 	}
 }
 
-// Write the config to the database
-func writeToFile(ctx context.Context, configBytes []byte, db *sql.DB, workspaces string) error {
+// Encrypt and store the config to the database
+func persistConfig(ctx context.Context, configBytes []byte, db *sql.DB, workspaces string) error {
 	// write to config table
 	_, err := db.ExecContext(
 		ctx,
@@ -117,11 +103,4 @@ func setupDBConn() (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
-}
-
-func clearOldConfig(db *sql.DB) {
-	_, err := db.Exec(`DELETE FROM config_cache WHERE created_at < NOW() - INTERVAL '5 minutes'`)
-	if err != nil {
-		pkgLogger.Errorf("failed to delete old config: %v", err)
-	}
 }
