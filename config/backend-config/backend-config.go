@@ -131,12 +131,12 @@ func filterProcessorEnabledDestinations(config ConfigT) ConfigT {
 	return modifiedConfig
 }
 
-func (bc *CommonBackendConfig) configUpdate(ctx context.Context, statConfigBackendError stats.RudderStats, workspaces string) {
+func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackendError stats.RudderStats, workspaces string) {
 	var (
 		sourceJSON ConfigT
 		err        error
 	)
-	sourceJSON, err = backendConfig.Get(ctx, workspaces)
+	sourceJSON, err = bc.workspaceConfig.Get(ctx, workspaces)
 	if err != nil {
 		statConfigBackendError.Increment()
 		pkgLogger.Warnf("Error fetching config from backend: %v", err)
@@ -175,6 +175,8 @@ func (bc *CommonBackendConfig) configUpdate(ctx context.Context, statConfigBacke
 		LastSync = time.Now().Format(time.RFC3339) // TODO fix concurrent access
 		bc.eb.Publish(string(TopicBackendConfig), sourceJSON)
 		bc.eb.Publish(string(TopicProcessConfig), filteredSourcesJSON)
+	} else {
+		bc.curSourceJSONLock.Unlock()
 	}
 
 	bc.initializedLock.Lock()

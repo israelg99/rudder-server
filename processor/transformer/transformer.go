@@ -31,6 +31,8 @@ const (
 	TrackingPlanValidationStage = "trackingPlan_validation"
 )
 
+const StatusCPDown = 721 // TODO
+
 var jsonfast = jsoniter.ConfigCompatibleWithStandardLibrary
 
 type MetadataT struct {
@@ -324,9 +326,12 @@ func (trans *HandleT) request(ctx context.Context, url string, data []Transforme
 			trans.requestTime(statsTags(data[0]), time.Since(s))
 			reqFailed = true
 			trans.logger.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err)
-			if retryCount > maxRetry {
-				panic(fmt.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err))
+			if resp.StatusCode != StatusCPDown {
+				if retryCount > maxRetry {
+					panic(fmt.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err))
+				}
 			}
+			resp.Body.Close()
 			retryCount++
 			time.Sleep(retrySleep)
 			// Refresh the connection
