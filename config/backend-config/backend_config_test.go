@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/ory/dockertest"
+	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
 	adminpkg "github.com/rudderlabs/rudder-server/admin"
