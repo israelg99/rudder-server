@@ -1,3 +1,4 @@
+//go:generate mockgen -destination=./mock_cacheStore.go -package=backendconfig -source=./config_cache.go cacheStore
 package backendconfig
 
 import (
@@ -8,53 +9,72 @@ import (
 	"github.com/rudderlabs/rudder-server/jobsdb"
 )
 
-var db *sql.DB
+type Cache interface {
+	Get(ctx context.Context) (ConfigT, error)
+	Set(ctx context.Context, config ConfigT) error
+}
+type cacheStore struct {
+	*sql.DB
+	key        string
+	workspaces string
+}
 
-// new goroutine here to cache the config
-func cache(ctx context.Context, workspaces string) {
-	var err error
+// returns a new Cache instance, and starts a goroutine to cache the config
+func (bc *backendConfigImpl) startCache(ctx context.Context, workspaces string) Cache {
+	var (
+		err    error
+		dbConn *sql.DB
+		key    = bc.AccessToken()
+	)
 	// setup db connection
-	db, err = setupDBConn()
+	dbConn, err = setupDBConn()
+	dbStore := cacheStore{
+		dbConn,
+		key,
+		workspaces,
+	}
 	if err != nil {
 		pkgLogger.Errorf("failed to setup db: %v", err)
-		return
+		return &dbStore
 	}
-	defer db.Close()
-
-	// subscribe to config and write to db
-	ch := DefaultBackendConfig.Subscribe(ctx, TopicProcessConfig)
-	for config := range ch {
-		// persist to database
-		configBytes, err := json.Marshal(config)
-		if err != nil {
-			pkgLogger.Errorf("failed to marshal config: %v", err)
+	go func() {
+		// subscribe to config and write to db
+		ch := bc.Subscribe(ctx, TopicProcessConfig)
+		for config := range ch {
+			// persist to database
+			err = dbStore.Set(ctx, config.Data.(ConfigT))
+			if err != nil {
+				pkgLogger.Errorf("failed writing config to database: %v", err)
+			}
 		}
-		err = persistConfig(ctx, configBytes, db, workspaces)
-		if err != nil {
-			pkgLogger.Errorf("failed writing config to database: %v", err)
-		}
-	}
+		dbStore.Close()
+	}()
+	return &dbStore
 }
 
 // Encrypt and store the config to the database
-func persistConfig(ctx context.Context, configBytes []byte, db *sql.DB, workspaces string) error {
+func (db *cacheStore) Set(ctx context.Context, config ConfigT) error {
+	configBytes, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
 	// write to config table
-	_, err := db.ExecContext(
+	_, err = db.ExecContext(
 		ctx,
 		`INSERT INTO config_cache (workspaces, config) VALUES ($1, pgp_sym_encrypt($2, $3))
 		on conflict (workspaces)
 		do update set
 		config = pgp_sym_encrypt($2, $3),
 		updated_at = NOW()`,
-		workspaces,
+		db.workspaces,
 		configBytes,
-		DefaultBackendConfig.AccessToken(),
+		db.key,
 	)
 	return err
 }
 
 // Fetch the cached config when needed
-func getCachedConfig(ctx context.Context, workspaces string) (ConfigT, error) {
+func (db *cacheStore) Get(ctx context.Context) (ConfigT, error) {
 	// read from database
 	var (
 		config      ConfigT
@@ -63,9 +83,9 @@ func getCachedConfig(ctx context.Context, workspaces string) (ConfigT, error) {
 	)
 	err = db.QueryRowContext(
 		ctx,
-		`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2 order by created_at desc limit 1`,
-		DefaultBackendConfig.AccessToken(),
-		workspaces,
+		`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2`,
+		db.key,
+		db.workspaces,
 	).Scan(&configBytes)
 	switch err {
 	case nil:

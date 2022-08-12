@@ -72,6 +72,7 @@ type backendConfigImpl struct {
 	curSourceJSON     ConfigT
 	curSourceJSONLock sync.RWMutex
 	usingCache        bool
+	cache             Cache
 }
 
 func loadConfig() {
@@ -142,7 +143,7 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 
 		if !bc.usingCache {
 			var cacheErr error
-			sourceJSON, cacheErr = getCachedConfig(ctx, workspaces)
+			sourceJSON, cacheErr = bc.cache.Get(ctx)
 			if cacheErr != nil {
 				pkgLogger.Warnf("Error fetching config from cache: %v", cacheErr)
 				return
@@ -276,12 +277,10 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
+	bc.cache = bc.startCache(ctx, workspaces)
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)
 		close(bc.blockChan)
-	})
-	rruntime.Go(func() {
-		cache(ctx, workspaces)
 	})
 }
 

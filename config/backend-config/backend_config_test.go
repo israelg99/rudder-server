@@ -2,19 +2,25 @@ package backendconfig
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/ory/dockertest"
 	"github.com/stretchr/testify/require"
 
 	adminpkg "github.com/rudderlabs/rudder-server/admin"
 	"github.com/rudderlabs/rudder-server/config"
+	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/services/diagnostics"
 	"github.com/rudderlabs/rudder-server/services/stats"
 	"github.com/rudderlabs/rudder-server/utils/logger"
@@ -98,6 +104,49 @@ func TestBadResponse(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 
+	// set up database
+	pool, err := dockertest.NewPool("")
+	if err != nil {
+		t.Fatalf("Could not connect to docker: %s\n", err)
+	}
+	database := "jobsdb"
+	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
+		"POSTGRES_PASSWORD=password",
+		"POSTGRES_DB=" + database,
+		"POSTGRES_USER=rudder",
+	})
+	if err != nil {
+		t.Fatalf("Could not start resource: %s\n", err)
+	}
+	defer func() {
+		if err := pool.Purge(resourcePostgres); err != nil {
+			t.Fatalf("Could not purge resource: %s \n", err)
+		}
+	}()
+	port := resourcePostgres.GetPort("5432/tcp")
+	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
+	fmt.Println("DB_DSN:", DB_DSN)
+	t.Setenv("JOBS_DB_DB_NAME", database)
+	t.Setenv("JOBS_DB_HOST", "localhost")
+	t.Setenv("JOBS_DB_NAME", database)
+	t.Setenv("JOBS_DB_USER", "rudder")
+	t.Setenv("JOBS_DB_PASSWORD", "password")
+	t.Setenv("JOBS_DB_PORT", port)
+
+	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+	var db *sql.DB
+	if err := pool.Retry(func() error {
+		var err error
+		db, err = sql.Open("postgres", DB_DSN)
+		if err != nil {
+			return err
+		}
+		return db.Ping()
+	}); err != nil {
+		t.Fatalf("Could not connect to docker: %s\n", err)
+	}
+	jobsdb.Init2()
+
 	configs := map[string]workspaceConfig{
 		"namespace": &namespaceConfig{
 			ConfigBackendURL: parsedURL,
@@ -116,11 +165,12 @@ func TestBadResponse(t *testing.T) {
 	for name, conf := range configs {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			pkgLogger = &logger.NOP{}
+			pkgLogger = logger.NewLogger()
 			atomic.StoreInt32(&calls, 0)
 
 			bc := &backendConfigImpl{
 				workspaceConfig: conf,
+				eb:              pubsub.New(),
 			}
 			bc.StartWithIDs(ctx, "")
 			go bc.WaitForConfig(ctx)
@@ -188,7 +238,9 @@ func TestConfigUpdate(t *testing.T) {
 			ctrl       = gomock.NewController(t)
 			ctx        = context.Background()
 			fakeError  = errors.New("fake error")
+			cacheError = errors.New("cache error")
 			workspaces = "foo"
+			cacheStore = NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 
@@ -196,7 +248,11 @@ func TestConfigUpdate(t *testing.T) {
 		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(ConfigT{}, fakeError).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
 
-		bc := &backendConfigImpl{workspaceConfig: wc}
+		bc := &backendConfigImpl{
+			workspaceConfig: wc,
+			cache:           cacheStore,
+		}
+		cacheStore.EXPECT().Get(ctx).Return(ConfigT{}, cacheError).Times(1)
 		bc.configUpdate(ctx, statConfigBackendError, workspaces)
 		require.False(t, bc.initialized)
 	})
@@ -206,6 +262,7 @@ func TestConfigUpdate(t *testing.T) {
 			ctrl       = gomock.NewController(t)
 			ctx        = context.Background()
 			workspaces = "foo"
+			cacheStore = NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 
@@ -216,6 +273,7 @@ func TestConfigUpdate(t *testing.T) {
 		bc := &backendConfigImpl{
 			workspaceConfig: wc,
 			curSourceJSON:   sampleBackendConfig, // same as the one returned by the workspace config
+			cache:           cacheStore,
 		}
 		bc.configUpdate(ctx, statConfigBackendError, workspaces)
 		require.True(t, bc.initialized)
@@ -226,6 +284,7 @@ func TestConfigUpdate(t *testing.T) {
 			ctrl        = gomock.NewController(t)
 			ctx, cancel = context.WithCancel(context.Background())
 			workspaces  = "foo"
+			cacheStore  = NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 		defer cancel()
@@ -238,6 +297,7 @@ func TestConfigUpdate(t *testing.T) {
 		bc := &backendConfigImpl{
 			eb:              &pubSub,
 			workspaceConfig: wc,
+			cache:           cacheStore,
 		}
 		bc.curSourceJSON = sampleBackendConfig2
 
@@ -337,6 +397,139 @@ func TestWaitForConfig(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&done) == 1
 		}, 100*time.Millisecond, time.Millisecond)
+	})
+}
+
+func TestCache(t *testing.T) {
+	initBackendConfig()
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defer atomic.AddInt32(&calls, 1)
+		t.Log("Server got called")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	// parsedURL, err := url.Parse(server.URL)
+	_, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	// set up database
+	pool, err := dockertest.NewPool("")
+	if err != nil {
+		t.Fatalf("Could not connect to docker: %s\n", err)
+	}
+	database := "jobsdb"
+	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
+		"POSTGRES_PASSWORD=password",
+		"POSTGRES_DB=" + database,
+		"POSTGRES_USER=rudder",
+	})
+	if err != nil {
+		t.Fatalf("Could not start resource: %s\n", err)
+	}
+	defer func() {
+		if err := pool.Purge(resourcePostgres); err != nil {
+			t.Fatalf("Could not purge resource: %s \n", err)
+		}
+	}()
+	port := resourcePostgres.GetPort("5432/tcp")
+	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
+	fmt.Println("DB_DSN:", DB_DSN)
+	t.Setenv("JOBS_DB_DB_NAME", database)
+	t.Setenv("JOBS_DB_HOST", "localhost")
+	t.Setenv("JOBS_DB_NAME", database)
+	t.Setenv("JOBS_DB_USER", "rudder")
+	t.Setenv("JOBS_DB_PASSWORD", "password")
+	t.Setenv("JOBS_DB_PORT", port)
+
+	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+	var db *sql.DB
+	if err := pool.Retry(func() error {
+		var err error
+		db, err = sql.Open("postgres", DB_DSN)
+		if err != nil {
+			return err
+		}
+		return db.Ping()
+	}); err != nil {
+		t.Fatalf("Could not connect to docker: %s\n", err)
+	}
+	jobsdb.Init2()
+
+	t.Run("fetch from database when call to control plane fails", func(t *testing.T) {
+		var (
+			ctrl        = gomock.NewController(t)
+			ctx, cancel = context.WithCancel(context.Background())
+			workspaces  = "foo"
+			cacheStore  = NewMockCache(ctrl)
+		)
+		defer ctrl.Finish()
+		defer cancel()
+
+		wc := NewMockworkspaceConfig(ctrl)
+		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(ConfigT{}, errors.New("control plane down")).Times(1)
+		cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(sampleBackendConfig, nil).Times(1)
+		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		pubSub := pubsub.PublishSubscriber{}
+		bc := &backendConfigImpl{
+			eb:              &pubSub,
+			workspaceConfig: wc,
+			cache:           cacheStore,
+		}
+		bc.curSourceJSON = sampleBackendConfig2
+
+		chProcess := pubSub.Subscribe(ctx, string(TopicProcessConfig))
+		chBackend := pubSub.Subscribe(ctx, string(TopicBackendConfig))
+
+		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		require.True(t, bc.initialized)
+		require.Equal(t, (<-chProcess).Data, sampleFilteredSources)
+		require.Equal(t, (<-chBackend).Data, sampleBackendConfig)
+	})
+
+	t.Run("stores config to database", func(t *testing.T) {
+		var (
+			ctrl       = gomock.NewController(t)
+			ctx        = context.Background()
+			workspaces = "foo"
+			// cacheStore  = NewMockCache(ctrl)
+			accessToken = `accessToken`
+		)
+		defer ctrl.Finish()
+
+		wc := NewMockworkspaceConfig(ctrl)
+		wc.EXPECT().Get(gomock.Any(), workspaces).Return(sampleBackendConfig, nil).AnyTimes()
+		wc.EXPECT().AccessToken().Return(accessToken).Times(1)
+		bc := &backendConfigImpl{
+			workspaceConfig: wc,
+			eb:              pubsub.New(),
+		}
+		bc.StartWithIDs(ctx, workspaces)
+		var (
+			configBytes []byte
+			config      ConfigT
+		)
+		require.Eventually(t, func() bool {
+			err = db.QueryRowContext(
+				ctx,
+				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2`,
+				accessToken,
+				workspaces,
+			).Scan(&configBytes)
+			require.True(
+				t,
+				err == nil || err == sql.ErrNoRows,
+				"only permissible error is in case there's no config cached for said workspaces",
+			)
+			err = json.Unmarshal(configBytes, &config)
+			require.NoError(t, err)
+			return reflect.DeepEqual(config, sampleFilteredSources)
+		},
+			10*time.Second,
+			1*time.Second,
+		)
 	})
 }
 
