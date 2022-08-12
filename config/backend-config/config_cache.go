@@ -24,7 +24,7 @@ func cache(ctx context.Context, workspaces string) {
 	defer db.Close()
 
 	// subscribe to config and write to db
-	ch := backendConfig.Subscribe(ctx, TopicProcessConfig)
+	ch := DefaultBackendConfig.Subscribe(ctx, TopicProcessConfig)
 	for config := range ch {
 		// persist to database
 		configBytes, err := json.Marshal(config)
@@ -43,7 +43,11 @@ func persistConfig(ctx context.Context, configBytes []byte, db *sql.DB, workspac
 	// write to config table
 	_, err := db.ExecContext(
 		ctx,
-		`INSERT INTO config_cache (workspaces, config) VALUES ($1, pgp_sym_encrypt($2, $3))`,
+		`INSERT INTO config_cache (workspaces, config) VALUES ($1, pgp_sym_encrypt($2, $3))
+		on conflict (workspaces)
+		do update set
+		config = pgp_sym_encrypt($2, $3),
+		updated_at = NOW()`,
 		workspaces,
 		configBytes,
 		DefaultBackendConfig.AccessToken(),
@@ -54,15 +58,23 @@ func persistConfig(ctx context.Context, configBytes []byte, db *sql.DB, workspac
 // Fetch the cached config when needed
 func getCachedConfig(ctx context.Context, workspaces string) (ConfigT, error) {
 	// read from database
-	var config ConfigT
-	var configBytes []byte
-	err := db.QueryRowContext(
+	var (
+		config      ConfigT
+		configBytes []byte
+		err         error
+	)
+	err = db.QueryRowContext(
 		ctx,
 		`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2 order by created_at desc limit 1`,
 		DefaultBackendConfig.AccessToken(),
 		workspaces,
 	).Scan(&configBytes)
-	if err != nil {
+	switch err {
+	case nil:
+	case sql.ErrNoRows:
+		// maybe fetch the config where workspaces = ''?
+		return config, err
+	default:
 		return config, err
 	}
 	err = json.Unmarshal(configBytes, &config)
@@ -87,9 +99,9 @@ func setupDBConn() (*sql.DB, error) {
 	}
 	// create table if it doesn't exist
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS config_cache (
-		id SERIAL PRIMARY KEY,
-		workspaces TEXT NOT NULL,
+		workspaces TEXT NOT NULL PRIMARY KEY,
 		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 		config bytea NOT NULL
 	)`)
 	if err != nil {
