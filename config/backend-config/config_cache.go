@@ -8,9 +8,7 @@ import (
 	"github.com/rudderlabs/rudder-server/jobsdb"
 )
 
-var (
-	db *sql.DB
-)
+var db *sql.DB
 
 // new goroutine here to cache the config
 func cache(ctx context.Context, workspaces string) {
