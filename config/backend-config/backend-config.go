@@ -71,7 +71,6 @@ type backendConfigImpl struct {
 	initialized       bool
 	curSourceJSON     ConfigT
 	curSourceJSONLock sync.RWMutex
-	cacheLock         sync.RWMutex
 	usingCache        bool
 }
 
@@ -153,10 +152,8 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 			pkgLogger.Info("Using cache already")
 			return
 		}
-	} else {
-		if bc.usingCache {
-			bc.usingCache = false
-		}
+	} else if bc.usingCache {
+		bc.usingCache = false
 	}
 
 	// sorting the sourceJSON.
@@ -284,12 +281,8 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 		close(bc.blockChan)
 	})
 	rruntime.Go(func() {
-		bc.Cache(ctx, workspaces)
+		cache(ctx, workspaces)
 	})
-}
-
-func (bc *backendConfigImpl) Cache(ctx context.Context, workspaces string) {
-	cache(ctx, workspaces)
 }
 
 func (bc *backendConfigImpl) Stop() {
