@@ -9,56 +9,80 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+	pubsub "github.com/rudderlabs/rudder-server/utils/pubsub"
 )
 
-// MockCache is a mock of Cache interface.
-type MockCache struct {
+// Mockpublisher is a mock of publisher interface.
+type Mockpublisher struct {
 	ctrl     *gomock.Controller
-	recorder *MockCacheMockRecorder
+	recorder *MockpublisherMockRecorder
 }
 
-// MockCacheMockRecorder is the mock recorder for MockCache.
-type MockCacheMockRecorder struct {
-	mock *MockCache
+// MockpublisherMockRecorder is the mock recorder for Mockpublisher.
+type MockpublisherMockRecorder struct {
+	mock *Mockpublisher
 }
 
-// NewMockCache creates a new mock instance.
-func NewMockCache(ctrl *gomock.Controller) *MockCache {
-	mock := &MockCache{ctrl: ctrl}
-	mock.recorder = &MockCacheMockRecorder{mock}
+// NewMockpublisher creates a new mock instance.
+func NewMockpublisher(ctrl *gomock.Controller) *Mockpublisher {
+	mock := &Mockpublisher{ctrl: ctrl}
+	mock.recorder = &MockpublisherMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockCache) EXPECT() *MockCacheMockRecorder {
+func (m *Mockpublisher) EXPECT() *MockpublisherMockRecorder {
 	return m.recorder
 }
 
-// Get mocks base method.
-func (m *MockCache) Get(ctx context.Context) (ConfigT, error) {
+// Subscribe mocks base method.
+func (m *Mockpublisher) Subscribe(ctx context.Context, topic Topic) pubsub.DataChannel {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Get", ctx)
+	ret := m.ctrl.Call(m, "Subscribe", ctx, topic)
+	ret0, _ := ret[0].(pubsub.DataChannel)
+	return ret0
+}
+
+// Subscribe indicates an expected call of Subscribe.
+func (mr *MockpublisherMockRecorder) Subscribe(ctx, topic interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Subscribe", reflect.TypeOf((*Mockpublisher)(nil).Subscribe), ctx, topic)
+}
+
+// Mockcache is a mock of cache interface.
+type Mockcache struct {
+	ctrl     *gomock.Controller
+	recorder *MockcacheMockRecorder
+}
+
+// MockcacheMockRecorder is the mock recorder for Mockcache.
+type MockcacheMockRecorder struct {
+	mock *Mockcache
+}
+
+// NewMockcache creates a new mock instance.
+func NewMockcache(ctrl *gomock.Controller) *Mockcache {
+	mock := &Mockcache{ctrl: ctrl}
+	mock.recorder = &MockcacheMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *Mockcache) EXPECT() *MockcacheMockRecorder {
+	return m.recorder
+}
+
+// get mocks base method.
+func (m *Mockcache) get(ctx context.Context) (ConfigT, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "get", ctx)
 	ret0, _ := ret[0].(ConfigT)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// Get indicates an expected call of Get.
-func (mr *MockCacheMockRecorder) Get(ctx interface{}) *gomock.Call {
+// get indicates an expected call of get.
+func (mr *MockcacheMockRecorder) get(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockCache)(nil).Get), ctx)
-}
-
-// Set mocks base method.
-func (m *MockCache) Set(ctx context.Context, config ConfigT) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Set", ctx, config)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Set indicates an expected call of Set.
-func (mr *MockCacheMockRecorder) Set(ctx, config interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockCache)(nil).Set), ctx, config)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "get", reflect.TypeOf((*Mockcache)(nil).get), ctx)
 }

@@ -5,6 +5,7 @@ package backendconfig
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 
 	adminpkg "github.com/rudderlabs/rudder-server/admin"
 	"github.com/rudderlabs/rudder-server/config"
+	"github.com/rudderlabs/rudder-server/config/backend-config/internal/cache"
 	"github.com/rudderlabs/rudder-server/rruntime"
 	"github.com/rudderlabs/rudder-server/services/diagnostics"
 	"github.com/rudderlabs/rudder-server/services/stats"
@@ -72,7 +74,7 @@ type backendConfigImpl struct {
 	curSourceJSON     ConfigT
 	curSourceJSONLock sync.RWMutex
 	usingCache        bool
-	cache             Cache
+	cache             cache.Cache
 }
 
 func loadConfig() {
@@ -142,10 +144,14 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		pkgLogger.Warnf("Error fetching config from backend: %v", err)
 
 		if !bc.usingCache {
-			var cacheErr error
-			sourceJSON, cacheErr = bc.cache.Get(ctx)
+			sourceJSONBytes, cacheErr := bc.cache.Get(ctx)
 			if cacheErr != nil {
 				pkgLogger.Warnf("Error fetching config from cache: %v", cacheErr)
+				return
+			}
+			err = json.Unmarshal(sourceJSONBytes, &sourceJSON)
+			if err != nil {
+				pkgLogger.Warnf("Error unmarshalling cached config: %v", cacheErr)
 				return
 			}
 			bc.usingCache = true
@@ -277,7 +283,9 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
-	bc.cache = bc.startCache(ctx, workspaces)
+	// TODO: SHA1 hash
+	cacheKey := workspaces
+	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)
 		close(bc.blockChan)

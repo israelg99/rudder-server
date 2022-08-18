@@ -20,6 +20,7 @@ import (
 
 	adminpkg "github.com/rudderlabs/rudder-server/admin"
 	"github.com/rudderlabs/rudder-server/config"
+	"github.com/rudderlabs/rudder-server/config/backend-config/internal/cache"
 	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/services/diagnostics"
 	"github.com/rudderlabs/rudder-server/services/stats"
@@ -240,7 +241,7 @@ func TestConfigUpdate(t *testing.T) {
 			fakeError  = errors.New("fake error")
 			cacheError = errors.New("cache error")
 			workspaces = "foo"
-			cacheStore = NewMockCache(ctrl)
+			cacheStore = cache.NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 
@@ -252,7 +253,7 @@ func TestConfigUpdate(t *testing.T) {
 			workspaceConfig: wc,
 			cache:           cacheStore,
 		}
-		cacheStore.EXPECT().Get(ctx).Return(ConfigT{}, cacheError).Times(1)
+		cacheStore.EXPECT().Get(ctx).Return([]byte{}, cacheError).Times(1)
 		bc.configUpdate(ctx, statConfigBackendError, workspaces)
 		require.False(t, bc.initialized)
 	})
@@ -262,7 +263,7 @@ func TestConfigUpdate(t *testing.T) {
 			ctrl       = gomock.NewController(t)
 			ctx        = context.Background()
 			workspaces = "foo"
-			cacheStore = NewMockCache(ctrl)
+			cacheStore = cache.NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 
@@ -284,7 +285,7 @@ func TestConfigUpdate(t *testing.T) {
 			ctrl        = gomock.NewController(t)
 			ctx, cancel = context.WithCancel(context.Background())
 			workspaces  = "foo"
-			cacheStore  = NewMockCache(ctrl)
+			cacheStore  = cache.NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 		defer cancel()
@@ -463,14 +464,15 @@ func TestCache(t *testing.T) {
 			ctrl        = gomock.NewController(t)
 			ctx, cancel = context.WithCancel(context.Background())
 			workspaces  = "foo"
-			cacheStore  = NewMockCache(ctrl)
+			cacheStore  = cache.NewMockCache(ctrl)
 		)
 		defer ctrl.Finish()
 		defer cancel()
 
 		wc := NewMockworkspaceConfig(ctrl)
 		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(ConfigT{}, errors.New("control plane down")).Times(1)
-		cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(sampleBackendConfig, nil).Times(1)
+		sampleBackendConfigBytes, _ := json.Marshal(sampleBackendConfig)
+		cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(sampleBackendConfigBytes, nil).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
 		pubSub := pubsub.PublishSubscriber{}
 		bc := &backendConfigImpl{
@@ -514,7 +516,7 @@ func TestCache(t *testing.T) {
 		require.Eventually(t, func() bool {
 			err = db.QueryRowContext(
 				ctx,
-				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE workspaces = $2`,
+				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE key = $2`,
 				accessToken,
 				workspaces,
 			).Scan(&configBytes)
@@ -525,7 +527,7 @@ func TestCache(t *testing.T) {
 			)
 			err = json.Unmarshal(configBytes, &config)
 			require.NoError(t, err)
-			return reflect.DeepEqual(config, sampleFilteredSources)
+			return reflect.DeepEqual(config, sampleBackendConfig)
 		},
 			10*time.Second,
 			1*time.Second,
