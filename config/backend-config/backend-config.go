@@ -5,7 +5,7 @@ package backendconfig
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" // skipcq: GSC-G505
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -302,7 +302,7 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
-	cacheKey := fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))) // using a fixed size key
+	cacheKey := fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))) // using a fixed size key	// skipcq: GSC-G401, GO-S1025
 	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)

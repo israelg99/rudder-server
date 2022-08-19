@@ -2,7 +2,7 @@ package backendconfig
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" // skipcq: GSC-G505
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -546,7 +546,7 @@ func TestCache(t *testing.T) {
 				ctx,
 				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE key = $2`,
 				accessToken,
-				fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))),
+				fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))), // skipcq: GSC-G401, GO-S1025
 			).Scan(&configBytes)
 			if err != nil {
 				return false
