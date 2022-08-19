@@ -5,6 +5,7 @@ package backendconfig
 
 import (
 	"context"
+	"crypto/sha512"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -133,7 +134,7 @@ func filterProcessorEnabledDestinations(config ConfigT) ConfigT {
 	return modifiedConfig
 }
 
-func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackendError stats.RudderStats, workspaces string) {
+func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackendError, cacheConfigGauge stats.RudderStats, workspaces string) {
 	var (
 		sourceJSON ConfigT
 		err        error
@@ -142,6 +143,13 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 	if err != nil {
 		statConfigBackendError.Increment()
 		pkgLogger.Warnf("Error fetching config from backend: %v", err)
+
+		bc.initializedLock.RLock()
+		if bc.initialized {
+			bc.initializedLock.RUnlock()
+			return
+		}
+		bc.initializedLock.RUnlock()
 
 		if !bc.usingCache {
 			sourceJSONBytes, cacheErr := bc.cache.Get(ctx)
@@ -155,12 +163,16 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 				return
 			}
 			bc.usingCache = true
+			cacheConfigGauge.Gauge(1)
 		} else {
-			pkgLogger.Info("Using cache already")
+			pkgLogger.Debug("Using cache already, not publishing config")
 			return
 		}
-	} else if bc.usingCache {
-		bc.usingCache = false
+	} else {
+		cacheConfigGauge.Gauge(0)
+		if bc.usingCache {
+			bc.usingCache = false
+		}
 	}
 
 	// sorting the sourceJSON.
@@ -190,8 +202,9 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 
 func (bc *backendConfigImpl) pollConfigUpdate(ctx context.Context, workspaces string) {
 	statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+	statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
 	for {
-		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
 
 		select {
 		case <-ctx.Done():
@@ -210,11 +223,17 @@ func getConfig() ConfigT {
 
 /*
 Subscribe subscribes a channel to a specific topic of backend config updates.
+
 Channel will receive a new pubsub.DataEvent each time the backend configuration is updated.
+
 Data of the DataEvent should be a backendconfig.ConfigT struct.
+
 Available topics are:
+
 - TopicBackendConfig: Will receive complete backend configuration
+
 - TopicProcessConfig: Will receive only backend configuration of processor enabled destinations
+
 - TopicRegulations: Will receive all regulations
 */
 func (bc *backendConfigImpl) Subscribe(ctx context.Context, topic Topic) pubsub.DataChannel {
@@ -283,8 +302,7 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
-	// TODO: SHA1 hash
-	cacheKey := workspaces
+	cacheKey := fmt.Sprintf(`%x`, sha512.Sum512_256([]byte(workspaces)))
 	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)

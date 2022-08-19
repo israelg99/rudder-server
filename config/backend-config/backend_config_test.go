@@ -2,6 +2,7 @@ package backendconfig
 
 import (
 	"context"
+	"crypto/sha512"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -248,13 +249,14 @@ func TestConfigUpdate(t *testing.T) {
 		wc := NewMockworkspaceConfig(ctrl)
 		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(ConfigT{}, fakeError).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
 
 		bc := &backendConfigImpl{
 			workspaceConfig: wc,
 			cache:           cacheStore,
 		}
 		cacheStore.EXPECT().Get(ctx).Return([]byte{}, cacheError).Times(1)
-		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
 		require.False(t, bc.initialized)
 	})
 
@@ -270,13 +272,14 @@ func TestConfigUpdate(t *testing.T) {
 		wc := NewMockworkspaceConfig(ctrl)
 		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(sampleBackendConfig, nil).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
 
 		bc := &backendConfigImpl{
 			workspaceConfig: wc,
 			curSourceJSON:   sampleBackendConfig, // same as the one returned by the workspace config
 			cache:           cacheStore,
 		}
-		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
 		require.True(t, bc.initialized)
 	})
 
@@ -293,6 +296,7 @@ func TestConfigUpdate(t *testing.T) {
 		wc := NewMockworkspaceConfig(ctrl)
 		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(sampleBackendConfig, nil).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
 
 		pubSub := pubsub.PublishSubscriber{}
 		bc := &backendConfigImpl{
@@ -305,7 +309,7 @@ func TestConfigUpdate(t *testing.T) {
 		chProcess := pubSub.Subscribe(ctx, string(TopicProcessConfig))
 		chBackend := pubSub.Subscribe(ctx, string(TopicBackendConfig))
 
-		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
 		require.True(t, bc.initialized)
 		require.Equal(t, (<-chProcess).Data, sampleFilteredSources)
 		require.Equal(t, (<-chBackend).Data, sampleBackendConfig)
@@ -474,6 +478,7 @@ func TestCache(t *testing.T) {
 		sampleBackendConfigBytes, _ := json.Marshal(sampleBackendConfig)
 		cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(sampleBackendConfigBytes, nil).Times(1)
 		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
 		pubSub := pubsub.PublishSubscriber{}
 		bc := &backendConfigImpl{
 			eb:              &pubSub,
@@ -485,7 +490,7 @@ func TestCache(t *testing.T) {
 		chProcess := pubSub.Subscribe(ctx, string(TopicProcessConfig))
 		chBackend := pubSub.Subscribe(ctx, string(TopicBackendConfig))
 
-		bc.configUpdate(ctx, statConfigBackendError, workspaces)
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
 		require.True(t, bc.initialized)
 		require.Equal(t, (<-chProcess).Data, sampleFilteredSources)
 		require.Equal(t, (<-chBackend).Data, sampleBackendConfig)
@@ -518,7 +523,7 @@ func TestCache(t *testing.T) {
 				ctx,
 				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE key = $2`,
 				accessToken,
-				workspaces,
+				fmt.Sprintf(`%x`, sha512.Sum512_256([]byte(workspaces))),
 			).Scan(&configBytes)
 			require.True(
 				t,
