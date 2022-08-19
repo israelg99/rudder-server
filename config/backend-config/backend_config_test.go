@@ -6,12 +6,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/signal"
 	"reflect"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -90,8 +95,86 @@ var sampleBackendConfig2 = ConfigT{
 	},
 }
 
+var (
+	hold bool
+	db   *sql.DB
+)
+
+func TestMain(m *testing.M) {
+	flag.BoolVar(&hold, "hold", false, "hold environment clean-up after test execution until Ctrl+C is provided")
+	flag.Parse()
+
+	// hack to make defer work, without being affected by the os.Exit in TestMain
+	os.Exit(run(m))
+}
+
+func run(m *testing.M) int {
+	// set up database
+	pool, err := dockertest.NewPool("")
+	if err != nil {
+		log.Printf("Could not connect to docker: %s\n", err)
+		return 1
+	}
+	database := "jobsdb"
+	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
+		"POSTGRES_PASSWORD=password",
+		"POSTGRES_DB=" + database,
+		"POSTGRES_USER=rudder",
+	})
+	if err != nil {
+		log.Printf("Could not start resource: %s\n", err)
+	}
+	defer func() {
+		if err := pool.Purge(resourcePostgres); err != nil {
+			log.Printf("Could not purge resource: %s \n", err)
+		}
+	}()
+	port := resourcePostgres.GetPort("5432/tcp")
+	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
+	fmt.Println("DB_DSN:", DB_DSN)
+	os.Setenv("JOBS_DB_DB_NAME", database)
+	os.Setenv("JOBS_DB_HOST", "localhost")
+	os.Setenv("JOBS_DB_NAME", database)
+	os.Setenv("JOBS_DB_USER", "rudder")
+	os.Setenv("JOBS_DB_PASSWORD", "password")
+	os.Setenv("JOBS_DB_PORT", port)
+
+	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+	if err := pool.Retry(func() error {
+		var err error
+		db, err = sql.Open("postgres", DB_DSN)
+		if err != nil {
+			return err
+		}
+		return db.Ping()
+	}); err != nil {
+		log.Printf("Could not connect to docker: %s\n", err)
+		return 1
+	}
+
+	code := m.Run()
+	blockOnHold()
+
+	return code
+}
+
+func blockOnHold() {
+	if !hold {
+		return
+	}
+
+	fmt.Println("Test on hold, before cleanup")
+	fmt.Println("Press Ctrl+C to exit")
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	<-c
+}
+
 func TestBadResponse(t *testing.T) {
 	initBackendConfig()
+	t.Setenv("RSERVER_BACKEND_CONFIG_POLL_INTERVAL", "10ms")
 
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -103,48 +186,6 @@ func TestBadResponse(t *testing.T) {
 
 	parsedURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
-
-	// set up database
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Fatalf("Could not connect to docker: %s\n", err)
-	}
-	database := "jobsdb"
-	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
-		"POSTGRES_PASSWORD=password",
-		"POSTGRES_DB=" + database,
-		"POSTGRES_USER=rudder",
-	})
-	if err != nil {
-		t.Fatalf("Could not start resource: %s\n", err)
-	}
-	defer func() {
-		if err := pool.Purge(resourcePostgres); err != nil {
-			t.Fatalf("Could not purge resource: %s \n", err)
-		}
-	}()
-	port := resourcePostgres.GetPort("5432/tcp")
-	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
-	fmt.Println("DB_DSN:", DB_DSN)
-	t.Setenv("JOBS_DB_DB_NAME", database)
-	t.Setenv("JOBS_DB_HOST", "localhost")
-	t.Setenv("JOBS_DB_NAME", database)
-	t.Setenv("JOBS_DB_USER", "rudder")
-	t.Setenv("JOBS_DB_PASSWORD", "password")
-	t.Setenv("JOBS_DB_PORT", port)
-
-	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-	var db *sql.DB
-	if err := pool.Retry(func() error {
-		var err error
-		db, err = sql.Open("postgres", DB_DSN)
-		if err != nil {
-			return err
-		}
-		return db.Ping()
-	}); err != nil {
-		t.Fatalf("Could not connect to docker: %s\n", err)
-	}
 
 	configs := map[string]workspaceConfig{
 		"namespace": &namespaceConfig{
@@ -417,48 +458,6 @@ func TestCache(t *testing.T) {
 	_, err := url.Parse(server.URL)
 	require.NoError(t, err)
 
-	// set up database
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Fatalf("Could not connect to docker: %s\n", err)
-	}
-	database := "jobsdb"
-	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
-		"POSTGRES_PASSWORD=password",
-		"POSTGRES_DB=" + database,
-		"POSTGRES_USER=rudder",
-	})
-	if err != nil {
-		t.Fatalf("Could not start resource: %s\n", err)
-	}
-	defer func() {
-		if err := pool.Purge(resourcePostgres); err != nil {
-			t.Fatalf("Could not purge resource: %s \n", err)
-		}
-	}()
-	port := resourcePostgres.GetPort("5432/tcp")
-	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
-	fmt.Println("DB_DSN:", DB_DSN)
-	t.Setenv("JOBS_DB_DB_NAME", database)
-	t.Setenv("JOBS_DB_HOST", "localhost")
-	t.Setenv("JOBS_DB_NAME", database)
-	t.Setenv("JOBS_DB_USER", "rudder")
-	t.Setenv("JOBS_DB_PASSWORD", "password")
-	t.Setenv("JOBS_DB_PORT", port)
-
-	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-	var db *sql.DB
-	if err := pool.Retry(func() error {
-		var err error
-		db, err = sql.Open("postgres", DB_DSN)
-		if err != nil {
-			return err
-		}
-		return db.Ping()
-	}); err != nil {
-		t.Fatalf("Could not connect to docker: %s\n", err)
-	}
-
 	t.Run("initialize from cache when a call to control plane fails", func(t *testing.T) {
 		var (
 			ctrl        = gomock.NewController(t)
@@ -493,7 +492,30 @@ func TestCache(t *testing.T) {
 	})
 
 	t.Run("not initialized from cache when a call to control plane fails and nothing exists in cache", func(t *testing.T) {
-		// TODO
+		var (
+			ctrl        = gomock.NewController(t)
+			ctx, cancel = context.WithCancel(context.Background())
+			workspaces  = "foo"
+			cacheStore  = cache.NewMockCache(ctrl)
+		)
+		defer ctrl.Finish()
+		defer cancel()
+
+		wc := NewMockworkspaceConfig(ctrl)
+		wc.EXPECT().Get(gomock.Eq(ctx), workspaces).Return(ConfigT{}, errors.New("control plane down")).Times(1)
+		cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return([]byte{}, sql.ErrNoRows).Times(1)
+		statConfigBackendError := stats.DefaultStats.NewStat("config_backend.errors", stats.CountType)
+		statCachedConfigGauge := stats.DefaultStats.NewStat("config_from_cache", stats.GaugeType)
+		pubSub := pubsub.PublishSubscriber{}
+		bc := &backendConfigImpl{
+			eb:              &pubSub,
+			workspaceConfig: wc,
+			cache:           cacheStore,
+		}
+		bc.curSourceJSON = sampleBackendConfig2
+
+		bc.configUpdate(ctx, statConfigBackendError, statCachedConfigGauge, workspaces)
+		require.False(t, bc.initialized)
 	})
 
 	t.Run("caches config to database", func(t *testing.T) {
@@ -507,8 +529,8 @@ func TestCache(t *testing.T) {
 		defer ctrl.Finish()
 
 		wc := NewMockworkspaceConfig(ctrl)
-		wc.EXPECT().Get(gomock.Any(), workspaces).Return(sampleBackendConfig, nil).AnyTimes()
 		wc.EXPECT().AccessToken().Return(accessToken).Times(1)
+		wc.EXPECT().Get(gomock.Any(), workspaces).Return(sampleBackendConfig, nil).AnyTimes()
 		bc := &backendConfigImpl{
 			workspaceConfig: wc,
 			eb:              pubsub.New(),

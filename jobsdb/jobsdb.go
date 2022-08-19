@@ -647,7 +647,6 @@ var (
 
 // Loads db config and migration related config from config file
 func loadConfig() {
-
 	/*Migration related parameters
 	jobDoneMigrateThres: A DS is migrated when this fraction of the jobs have been processed
 	jobStatusMigrateThres: A DS is migrated if the job_status exceeds this (* no_of_jobs)
