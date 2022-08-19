@@ -2,7 +2,7 @@ package backendconfig
 
 import (
 	"context"
-	"crypto/sha512"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,10 +19,8 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
-	adminpkg "github.com/rudderlabs/rudder-server/admin"
 	"github.com/rudderlabs/rudder-server/config"
 	"github.com/rudderlabs/rudder-server/config/backend-config/internal/cache"
-	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/services/diagnostics"
 	"github.com/rudderlabs/rudder-server/services/stats"
 	"github.com/rudderlabs/rudder-server/utils/logger"
@@ -147,7 +145,6 @@ func TestBadResponse(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Could not connect to docker: %s\n", err)
 	}
-	jobsdb.Init2()
 
 	configs := map[string]workspaceConfig{
 		"namespace": &namespaceConfig{
@@ -407,7 +404,7 @@ func TestWaitForConfig(t *testing.T) {
 
 func TestCache(t *testing.T) {
 	initBackendConfig()
-
+	t.Setenv("RSERVER_BACKEND_CONFIG_POLL_INTERVAL", "10ms")
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		defer atomic.AddInt32(&calls, 1)
@@ -461,9 +458,8 @@ func TestCache(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Could not connect to docker: %s\n", err)
 	}
-	jobsdb.Init2()
 
-	t.Run("fetch from database when call to control plane fails", func(t *testing.T) {
+	t.Run("initialize from cache when a call to control plane fails", func(t *testing.T) {
 		var (
 			ctrl        = gomock.NewController(t)
 			ctx, cancel = context.WithCancel(context.Background())
@@ -496,7 +492,11 @@ func TestCache(t *testing.T) {
 		require.Equal(t, (<-chBackend).Data, sampleBackendConfig)
 	})
 
-	t.Run("stores config to database", func(t *testing.T) {
+	t.Run("not initialized from cache when a call to control plane fails and nothing exists in cache", func(t *testing.T) {
+		// TODO
+	})
+
+	t.Run("caches config to database", func(t *testing.T) {
 		var (
 			ctrl       = gomock.NewController(t)
 			ctx        = context.Background()
@@ -514,6 +514,7 @@ func TestCache(t *testing.T) {
 			eb:              pubsub.New(),
 		}
 		bc.StartWithIDs(ctx, workspaces)
+		bc.WaitForConfig(ctx)
 		var (
 			configBytes []byte
 			config      ConfigT
@@ -523,26 +524,23 @@ func TestCache(t *testing.T) {
 				ctx,
 				`SELECT pgp_sym_decrypt(config, $1) FROM config_cache WHERE key = $2`,
 				accessToken,
-				fmt.Sprintf(`%x`, sha512.Sum512_256([]byte(workspaces))),
+				fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))),
 			).Scan(&configBytes)
-			require.True(
-				t,
-				err == nil || err == sql.ErrNoRows,
-				"only permissible error is in case there's no config cached for said workspaces",
-			)
+			if err != nil {
+				return false
+			}
 			err = json.Unmarshal(configBytes, &config)
 			require.NoError(t, err)
 			return reflect.DeepEqual(config, sampleBackendConfig)
 		},
 			10*time.Second,
-			1*time.Second,
+			100*time.Millisecond,
 		)
 	})
 }
 
 func initBackendConfig() {
 	config.Load()
-	adminpkg.Init()
 	diagnostics.Init()
 	logger.Init()
 	stats.Setup()

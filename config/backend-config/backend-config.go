@@ -5,7 +5,7 @@ package backendconfig
 
 import (
 	"context"
-	"crypto/sha512"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -139,6 +139,14 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		sourceJSON ConfigT
 		err        error
 	)
+	defer func() {
+		if bc.usingCache {
+			cacheConfigGauge.Gauge(1)
+		} else {
+			cacheConfigGauge.Gauge(0)
+		}
+	}()
+
 	sourceJSON, err = bc.workspaceConfig.Get(ctx, workspaces)
 	if err != nil {
 		statConfigBackendError.Increment()
@@ -151,28 +159,20 @@ func (bc *backendConfigImpl) configUpdate(ctx context.Context, statConfigBackend
 		}
 		bc.initializedLock.RUnlock()
 
-		if !bc.usingCache {
-			sourceJSONBytes, cacheErr := bc.cache.Get(ctx)
-			if cacheErr != nil {
-				pkgLogger.Warnf("Error fetching config from cache: %v", cacheErr)
-				return
-			}
-			err = json.Unmarshal(sourceJSONBytes, &sourceJSON)
-			if err != nil {
-				pkgLogger.Warnf("Error unmarshalling cached config: %v", cacheErr)
-				return
-			}
-			bc.usingCache = true
-			cacheConfigGauge.Gauge(1)
-		} else {
-			pkgLogger.Debug("Using cache already, not publishing config")
+		// try to get config from cache
+		sourceJSONBytes, cacheErr := bc.cache.Get(ctx)
+		if cacheErr != nil {
+			pkgLogger.Warnf("Error fetching config from cache: %v", cacheErr)
 			return
 		}
-	} else {
-		cacheConfigGauge.Gauge(0)
-		if bc.usingCache {
-			bc.usingCache = false
+		err = json.Unmarshal(sourceJSONBytes, &sourceJSON)
+		if err != nil {
+			pkgLogger.Warnf("Error unmarshalling cached config: %v", cacheErr)
+			return
 		}
+		bc.usingCache = true
+	} else {
+		bc.usingCache = false
 	}
 
 	// sorting the sourceJSON.
@@ -302,7 +302,7 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
-	cacheKey := fmt.Sprintf(`%x`, sha512.Sum512_256([]byte(workspaces)))
+	cacheKey := fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))) // using a fixed size key
 	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)

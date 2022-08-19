@@ -629,11 +629,6 @@ func getValidNonTerminalStates() (validNonTerminalStates []string) {
 }
 
 var (
-	host, user, password, dbname, sslmode, appName string
-	port                                           int
-)
-
-var (
 	maxDSSize, maxMigrateOnce, maxMigrateDSProbe int
 	maxTableSize                                 int64
 	jobDoneMigrateThres, jobStatusMigrateThres   float64
@@ -652,15 +647,6 @@ var (
 
 // Loads db config and migration related config from config file
 func loadConfig() {
-	host = config.GetEnv("JOBS_DB_HOST", "localhost")
-	user = config.GetEnv("JOBS_DB_USER", "ubuntu")
-	dbname = config.GetEnv("JOBS_DB_DB_NAME", "ubuntu")
-	port, _ = strconv.Atoi(config.GetEnv("JOBS_DB_PORT", "5432"))
-	password = config.GetEnv("JOBS_DB_PASSWORD", "ubuntu") // Reading secrets from
-	sslmode = config.GetEnv("JOBS_DB_SSL_MODE", "disable")
-	// Application Name can be any string of less than NAMEDATALEN characters (64 characters in a standard PostgreSQL build).
-	// There is no need to truncate the string on our own though since PostgreSQL auto-truncates this identifier and issues a relevant notice if necessary.
-	appName = misc.DefaultString("rudder-server").OnError(os.Hostname())
 
 	/*Migration related parameters
 	jobDoneMigrateThres: A DS is migrated when this fraction of the jobs have been processed
@@ -695,13 +681,6 @@ func loadConfig() {
 func Init2() {
 	loadConfig()
 	pkgLogger = logger.NewLogger().Child("jobsdb")
-}
-
-// GetConnectionString Returns Jobs DB connection configuration
-func GetConnectionString() string {
-	return fmt.Sprintf("host=%s port=%d user=%s "+
-		"password=%s dbname=%s sslmode=%s application_name=%s",
-		host, port, user, password, dbname, sslmode, appName)
 }
 
 type OptsFunc func(jd *HandleT)
@@ -813,7 +792,7 @@ func (jd *HandleT) init() {
 	// Initialize dbHandle if not already set
 	if jd.dbHandle == nil {
 		var err error
-		psqlInfo := GetConnectionString()
+		psqlInfo := misc.GetConnectionString()
 		db, err := sql.Open("postgres", psqlInfo)
 		jd.assertError(err)
 

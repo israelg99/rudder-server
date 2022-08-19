@@ -228,7 +228,7 @@ func monitorDestRouters(ctx context.Context, routerFactory *router.Factory, batc
 func NewRsourcesService(deploymentType deployment.Type) (rsources.JobService, error) {
 	var rsourcesConfig rsources.JobServiceConfig
 	rsourcesConfig.MaxPoolSize = config.GetInt("Rsources.PoolSize", 5)
-	rsourcesConfig.LocalConn = jobsdb.GetConnectionString()
+	rsourcesConfig.LocalConn = misc.GetConnectionString()
 	rsourcesConfig.LocalHostname = config.GetEnv("JOBS_DB_HOST", "localhost")
 	rsourcesConfig.SharedConn = config.GetEnv("SHARED_DB_DSN", "")
 	rsourcesConfig.SkipFailedRecordsCollection = !config.GetBool("Router.failedKeysEnabled", false)

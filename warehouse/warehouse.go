@@ -27,7 +27,6 @@ import (
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/config"
 	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/rruntime"
 	"github.com/rudderlabs/rudder-server/services/db"
 	destinationdebugger "github.com/rudderlabs/rudder-server/services/debugger/destination"
@@ -1658,7 +1657,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func getConnectionString() string {
 	if !CheckForWarehouseEnvVars() {
-		return jobsdb.GetConnectionString()
+		return misc.GetConnectionString()
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s "+
 		"password=%s dbname=%s sslmode=%s application_name=%s",
@@ -1805,7 +1804,7 @@ func Start(ctx context.Context, app app.Interface) error {
 
 	// Setting up reporting client
 	// only if standalone or embedded connecting to diff DB for warehouse
-	if (isStandAlone() && isMaster()) || (jobsdb.GetConnectionString() != psqlInfo) {
+	if (isStandAlone() && isMaster()) || (misc.GetConnectionString() != psqlInfo) {
 		reporting := application.Features().Reporting.Setup(backendconfig.DefaultBackendConfig)
 
 		g.Go(misc.WithBugsnagForWarehouse(func() error {

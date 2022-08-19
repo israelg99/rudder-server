@@ -6,8 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/utils/logger"
+	"github.com/rudderlabs/rudder-server/utils/misc"
 	"github.com/rudderlabs/rudder-server/utils/pubsub"
 )
 
@@ -107,7 +107,7 @@ func (db *cacheStore) Get(ctx context.Context) ([]byte, error) {
 
 // setupDBConn sets up the database connection, creates the config table if it doesn't exist
 func setupDBConn() (*sql.DB, error) {
-	psqlInfo := jobsdb.GetConnectionString()
+	psqlInfo := misc.GetConnectionString()
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
 		pkgLogger.Errorf("failed to open db: %v", err)

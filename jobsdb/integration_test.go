@@ -27,6 +27,7 @@ import (
 	"github.com/rudderlabs/rudder-server/services/archiver"
 	"github.com/rudderlabs/rudder-server/services/stats"
 	"github.com/rudderlabs/rudder-server/utils/logger"
+	"github.com/rudderlabs/rudder-server/utils/misc"
 )
 
 const (
@@ -904,7 +905,7 @@ func TestCreateDS(t *testing.T) {
 	t.Run("CreateDS in case of negative job_indices in the previous", func(t *testing.T) {
 		// create -ve index table
 		func() {
-			psqlInfo := jobsdb.GetConnectionString()
+			psqlInfo := misc.GetConnectionString()
 			db, err := sql.Open("postgres", psqlInfo)
 			require.NoError(t, err)
 			defer db.Close()

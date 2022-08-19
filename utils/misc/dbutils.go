@@ -3,7 +3,9 @@ package misc
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strconv"
+	"sync"
 
 	"github.com/lib/pq"
 
@@ -11,16 +13,31 @@ import (
 )
 
 var (
-	host, user, password, sslmode string
-	port                          int
+	host, user, password, dbname, sslmode, appName string
+	port                                           int
+	once                                           sync.Once
 )
 
 func loadConfig() {
 	host = config.GetEnv("JOBS_DB_HOST", "localhost")
 	user = config.GetEnv("JOBS_DB_USER", "ubuntu")
+	dbname = config.GetEnv("JOBS_DB_DB_NAME", "ubuntu")
 	port, _ = strconv.Atoi(config.GetEnv("JOBS_DB_PORT", "5432"))
 	password = config.GetEnv("JOBS_DB_PASSWORD", "ubuntu") // Reading secrets from
 	sslmode = config.GetEnv("JOBS_DB_SSL_MODE", "disable")
+	// Application Name can be any string of less than NAMEDATALEN characters (64 characters in a standard PostgreSQL build).
+	// There is no need to truncate the string on our own though since PostgreSQL auto-truncates this identifier and issues a relevant notice if necessary.
+	appName = DefaultString("rudder-server").OnError(os.Hostname())
+}
+
+// GetConnectionString Returns Jobs DB connection configuration
+func GetConnectionString() string {
+	once.Do(func() {
+		loadConfig()
+	})
+	return fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=%s application_name=%s",
+		host, port, user, password, dbname, sslmode, appName)
 }
 
 /*
@@ -28,7 +45,9 @@ ReplaceDB : Rename the OLD DB and create a new one.
 Since we are not journaling, this should be idemponent
 */
 func ReplaceDB(dbName, targetName string) {
-	loadConfig()
+	once.Do(func() {
+		loadConfig()
+	})
 	connInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=postgres sslmode=%s",
 		host, port, user, password, sslmode)
 	db, err := sql.Open("postgres", connInfo)
