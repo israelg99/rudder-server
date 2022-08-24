@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/rudderlabs/rudder-server/config"
@@ -31,7 +32,7 @@ const (
 	TrackingPlanValidationStage = "trackingPlan_validation"
 )
 
-const StatusCPDown = 721 // TODO
+const StatusCPDown = 809
 
 var jsonfast = jsoniter.ConfigCompatibleWithStandardLibrary
 
@@ -298,72 +299,43 @@ func (trans *HandleT) request(ctx context.Context, url string, data []Transforme
 	if err != nil {
 		panic(err)
 	}
-	retryCount := 0
-	var resp *http.Response
-	var respData []byte
-	// We should rarely have error communicating with our JS
-	reqFailed := false
 
 	if len(data) == 0 {
 		return nil
 	}
 
-	// assume that the first event is representative
+	var (
+		respData   []byte
+		statusCode int
+	)
 
-	for {
-		s := time.Now()
-		trace.WithRegion(ctx, "request/post", func() {
-			resp, err = trans.Client.Post(url, "application/json; charset=utf-8", bytes.NewBuffer(rawJSON))
-		})
-		if err == nil {
-			// If no err returned by client.Post, reading body.
-			// If reading body fails, retrying.
-			respData, err = io.ReadAll(resp.Body)
-			resp.Body.Close()
-		}
-
-		if err != nil {
-			trans.requestTime(statsTags(data[0]), time.Since(s))
-			reqFailed = true
+	// endless retry if transformer-controlplane connection is down
+	outerBackoff := backoff.NewExponentialBackOff()
+	outerBackoff.MaxElapsedTime = 0
+	// endless backoff loop, only nil error or panics inside
+	_ = backoff.RetryNotify(
+		func() error {
+			respData, statusCode = trans.doPost(ctx, rawJSON, url, statsTags(data[0]))
+			if statusCode == StatusCPDown {
+				return fmt.Errorf("control plane not reachable")
+			}
+			return nil
+		},
+		outerBackoff,
+		func(err error, t time.Duration) {
 			trans.logger.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err)
-			if retryCount > maxRetry {
-				panic(fmt.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err))
-			}
-			retryCount++
-			time.Sleep(retrySleep)
-			// Refresh the connection
-			continue
-		}
-		if reqFailed {
-			trans.logger.Errorf("Failed request succeeded after %v retries, URL: %v", retryCount, url)
-		}
-
-		// perform version compatibility check only on success
-		if resp.StatusCode == http.StatusOK {
-			transformerAPIVersion, convErr := strconv.Atoi(resp.Header.Get("apiVersion"))
-			if convErr != nil {
-				transformerAPIVersion = 0
-			}
-			if types.SUPPORTED_TRANSFORMER_API_VERSION != transformerAPIVersion {
-				trans.logger.Errorf("Incompatible transformer version: Expected: %d Received: %d, URL: %v", types.SUPPORTED_TRANSFORMER_API_VERSION, transformerAPIVersion, url)
-				panic(fmt.Errorf("Incompatible transformer version: Expected: %d Received: %d, URL: %v", types.SUPPORTED_TRANSFORMER_API_VERSION, transformerAPIVersion, url))
-			}
-		}
-
-		trans.requestTime(statsTags(data[0]), time.Since(s))
-		break
-	}
+		})
 
 	// Remove Assertion?
-	if !(resp.StatusCode == http.StatusOK ||
-		resp.StatusCode == http.StatusBadRequest ||
-		resp.StatusCode == http.StatusNotFound ||
-		resp.StatusCode == http.StatusRequestEntityTooLarge) {
-		trans.logger.Errorf("Transformer returned status code: %v", resp.StatusCode)
+	if !(statusCode == http.StatusOK ||
+		statusCode == http.StatusBadRequest ||
+		statusCode == http.StatusNotFound ||
+		statusCode == http.StatusRequestEntityTooLarge) {
+		trans.logger.Errorf("Transformer returned status code: %v", statusCode)
 	}
 
 	var transformerResponses []TransformerResponseT
-	if resp.StatusCode == http.StatusOK {
+	if statusCode == http.StatusOK {
 		integrations.CollectIntgTransformErrorStats(respData)
 
 		trace.Logf(ctx, "Unmarshal", "response raw size: %d", len(respData))
@@ -377,16 +349,68 @@ func (trans *HandleT) request(ctx context.Context, url string, data []Transforme
 			trans.logger.Errorf("Transformer returned : %v", string(respData))
 			respData = []byte(fmt.Sprintf("Failed to unmarshal transformer response: %s", string(respData)))
 			transformerResponses = nil
-			resp.StatusCode = 400
+			statusCode = 400
 		}
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	if statusCode != http.StatusOK {
 		for i := range data {
 			transformEvent := &data[i]
-			resp := TransformerResponseT{StatusCode: resp.StatusCode, Error: string(respData), Metadata: transformEvent.Metadata}
+			resp := TransformerResponseT{StatusCode: statusCode, Error: string(respData), Metadata: transformEvent.Metadata}
 			transformerResponses = append(transformerResponses, resp)
 		}
 	}
 	return transformerResponses
+}
+
+func (trans *HandleT) doPost(ctx context.Context, rawJSON []byte, url string, tags stats.Tags) ([]byte, int) {
+	var (
+		retryCount int
+		resp       *http.Response
+		respData   []byte
+	)
+	err := backoff.RetryNotify(
+		func() error {
+			var reqErr error
+			s := time.Now()
+			trace.WithRegion(ctx, "request/post", func() {
+				resp, reqErr = trans.Client.Post(url, "application/json; charset=utf-8", bytes.NewBuffer(rawJSON))
+			})
+			trans.requestTime(tags, time.Since(s))
+
+			if reqErr == nil {
+				// If no err returned by client.Post, reading body.
+				// If reading body fails, retrying.
+				respData, reqErr = io.ReadAll(resp.Body)
+				resp.Body.Close()
+			}
+			if reqErr != nil {
+				return reqErr
+			}
+
+			return nil
+		},
+		backoff.WithMaxRetries(backoff.NewExponentialBackOff(), uint64(maxRetry)),
+		func(err error, t time.Duration) {
+			trans.logger.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err)
+			retryCount++
+		})
+	if err != nil {
+		panic(err)
+	}
+	// perform version compatibility check only on success
+	if resp.StatusCode == http.StatusOK {
+		transformerAPIVersion, convErr := strconv.Atoi(resp.Header.Get("apiVersion"))
+		if convErr != nil {
+			transformerAPIVersion = 0
+		}
+		if types.SUPPORTED_TRANSFORMER_API_VERSION != transformerAPIVersion {
+			trans.logger.Errorf("Incompatible transformer version: Expected: %d Received: %d, URL: %v", types.SUPPORTED_TRANSFORMER_API_VERSION, transformerAPIVersion, url)
+			panic(fmt.Errorf("Incompatible transformer version: Expected: %d Received: %d, URL: %v", types.SUPPORTED_TRANSFORMER_API_VERSION, transformerAPIVersion, url))
+		}
+	}
+	if retryCount > 0 {
+		trans.logger.Errorf("Failed request succeeded after %v retries, URL: %v", retryCount, url)
+	}
+	return respData, resp.StatusCode
 }
