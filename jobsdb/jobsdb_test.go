@@ -3,6 +3,7 @@ package jobsdb
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -588,11 +589,14 @@ func TestRefreshDSList(t *testing.T) {
 
 	require.Equal(t, 1, len(jobsDB.getDSList()), "jobsDB should start with a ds list size of 1")
 	// this will throw error if refreshDSList is called without lock
-	jobsDB.addDS(newDataSet("batch_rt", "2"))
-	require.Equal(t, 1, len(jobsDB.getDSList()), "addDS should not refresh the ds list")
 	jobsDB.dsListLock.WithLock(func(l lock.DSListLockToken) {
-		require.Equal(t, 2, len(jobsDB.refreshDSList(l)), "after refreshing the ds list jobsDB should have a ds list size of 2")
+		err = jobsDB.WithTx(func(tx *sql.Tx) error {
+			return jobsDB.addNewDSInTx(tx, newDataSet("batch_rt", "2"), l)
+		})
+		_ = jobsDB.refreshDSRangeList(l)
 	})
+	require.NoError(t, err)
+	require.Equal(t, 2, len(jobsDB.getDSList()), "addDS should return 2 after refreshing the ds list")
 }
 
 func TestJobsDBTimeout(t *testing.T) {
@@ -680,4 +684,142 @@ func TestJobsDBTimeout(t *testing.T) {
 		require.True(t, errors.Is(ctx.Err(), context.DeadlineExceeded))
 		require.Equal(t, expectedRetries, errorsCount)
 	})
+}
+
+func TestThreadSafeAddNewDSLoop(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err, "Failed to create docker pool")
+	cleanup := &testhelper.Cleanup{}
+	defer cleanup.Run()
+
+	postgresResource, err := destination.SetupPostgres(pool, cleanup)
+	require.NoError(t, err)
+
+	{
+		t.Setenv("JOBS_DB_DB_NAME", postgresResource.Database)
+		t.Setenv("JOBS_DB_NAME", postgresResource.Database)
+		t.Setenv("JOBS_DB_HOST", postgresResource.Host)
+		t.Setenv("JOBS_DB_PORT", postgresResource.Port)
+		t.Setenv("JOBS_DB_USER", postgresResource.User)
+		t.Setenv("JOBS_DB_PASSWORD", postgresResource.Password)
+		initJobsDB()
+		stats.Setup()
+	}
+
+	migrationMode := ""
+	maxDSSize := 1
+	triggerAddNewDS1 := make(chan time.Time)
+	queryFilters := QueryFiltersT{
+		CustomVal: true,
+	}
+
+	// jobsDB-1 setup
+	jobsDB1 := &HandleT{
+		TriggerAddNewDS: func() <-chan time.Time {
+			return triggerAddNewDS1
+		},
+		MaxDSSize: &maxDSSize,
+	}
+	err = jobsDB1.Setup(ReadWrite, false, "batch_rt", migrationMode, true, queryFilters, []prebackup.Handler{})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(jobsDB1.getDSList()), "expected cache to be auto-updated with DS list length 1")
+
+	// jobsDB-2 setup
+	triggerAddNewDS2 := make(chan time.Time)
+	jobsDB2 := &HandleT{
+		TriggerAddNewDS: func() <-chan time.Time {
+			return triggerAddNewDS2
+		},
+		MaxDSSize: &maxDSSize,
+	}
+	err = jobsDB2.Setup(ReadWrite, false, "batch_rt", migrationMode, true, queryFilters, []prebackup.Handler{})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(jobsDB2.getDSList()), "expected cache to be auto-updated with DS list length 1")
+
+	// adding mock jobs to jobsDB-1
+	rtDS1 := newDataSet(jobsDB1.tablePrefix, fmt.Sprintf("%d", 1))
+	err = jobsDB1.WithTx(func(tx *sql.Tx) error {
+		if err := jobsDB1.copyJobsDS(tx, rtDS1, genJob(1, 0)); err != nil {
+			return err
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// triggerAddNewDS1 to trigger jobsDB-1 to add new DS
+	triggerAddNewDS1 <- time.Now()
+	require.Eventually(
+		t,
+		func() bool {
+			return len(jobsDB1.getDSList()) == 2
+		},
+		time.Second, time.Millisecond,
+		"expected cache to be auto-updated with DS list length 2")
+	fmt.Println("dsList:", jobsDB1.getDSList())
+
+	// adding mock jobs to jobsDB-2
+	rtDS2 := newDataSet(jobsDB1.tablePrefix, fmt.Sprintf("%d", 2))
+	err = jobsDB1.WithTx(func(tx *sql.Tx) error {
+		if err := jobsDB1.copyJobsDS(tx, rtDS2, genJob(1, 1)); err != nil {
+			return err
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// triggerAddNewDS2 to trigger jobsDB-2 to add new DS after refreshing cache
+	triggerAddNewDS2 <- time.Now()
+	require.Eventually(
+		t,
+		func() bool {
+			return len(jobsDB2.getDSList()) == 3
+		},
+		time.Second, time.Millisecond,
+		"expected jobsDB2 to be refresh the cache before adding new DS, to get to know about the DS-2 already present & hence add DS-3")
+
+	// adding mock jobs to jobsDB-2
+	rtDS3 := newDataSet(jobsDB1.tablePrefix, fmt.Sprintf("%d", 3))
+	err = jobsDB1.WithTx(func(tx *sql.Tx) error {
+		if err := jobsDB1.copyJobsDS(tx, rtDS3, genJob(1, 2)); err != nil {
+			return err
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	go func() {
+		triggerAddNewDS1 <- time.Now()
+	}()
+	triggerAddNewDS2 <- time.Now()
+	require.Eventually(
+		t,
+		func() bool {
+			var dsLen1, dsLen2 int
+			jobsDB1.dsListLock.WithLock(func(l lock.DSListLockToken) {
+				dsLen1 = len(jobsDB1.refreshDSList(l))
+			})
+			jobsDB2.dsListLock.WithLock(func(l lock.DSListLockToken) {
+				dsLen2 = len(jobsDB2.refreshDSList(l))
+			})
+			return dsLen1 == 4 && dsLen2 == 4
+		},
+		time.Second, time.Millisecond,
+		"expected only one DS to be added, even though both jobsDB-1 & jobsDB-2 are triggered to add new DS")
+}
+
+func genJob(numOfJob, lastJobId int) []*JobT {
+	customVal := "MOCKDS"
+	js := make([]*JobT, numOfJob)
+	for i := 0; i < numOfJob; i++ {
+		js[i] = &JobT{
+			Parameters:   []byte(`{"batch_id":1,"source_id":"sourceID","source_job_run_id":""}`),
+			EventPayload: []byte(`{"testKey":"testValue"}`),
+			UserID:       "a-292e-4e79-9880-f8009e0ae4a3",
+			UUID:         uuid.Must(uuid.NewV4()),
+			CustomVal:    customVal,
+			EventCount:   1,
+			JobID:        int64(lastJobId) + int64(i) + 1,
+		}
+	}
+	return js
 }

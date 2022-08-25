@@ -183,8 +183,13 @@ func (*backupTestCase) insertRTData(t *testing.T, jobs []*JobT, statusList []*Jo
 
 	rtDS2 := newDataSet("rt", "2")
 	jobsDB.dsListLock.WithLock(func(l lock.DSListLockToken) {
-		jobsDB.addNewDS(l, rtDS2)
+		err = jobsDB.WithTx(func(tx *sql.Tx) error {
+			return jobsDB.addNewDSInTx(tx, rtDS2, l)
+		})
+		_ = jobsDB.refreshDSRangeList(l)
 	})
+	jobsDB.assertError(err)
+
 	err = jobsDB.WithTx(func(tx *sql.Tx) error {
 		if err := jobsDB.copyJobsDS(tx, rtDS2, jobs); err != nil {
 			return err
@@ -225,8 +230,13 @@ func (*backupTestCase) insertBatchRTData(t *testing.T, jobs []*JobT, statusList 
 
 	ds2 := newDataSet("batch_rt", "2")
 	jobsDB.dsListLock.WithLock(func(l lock.DSListLockToken) {
-		jobsDB.addNewDS(l, ds2)
+		err = jobsDB.WithTx(func(tx *sql.Tx) error {
+			return jobsDB.addNewDSInTx(tx, ds2, l)
+		})
+		_ = jobsDB.refreshDSRangeList(l)
 	})
+	jobsDB.assertError(err)
+
 	err = jobsDB.WithTx(func(tx *sql.Tx) error {
 		if err := jobsDB.copyJobsDS(tx, ds2, jobs); err != nil {
 			t.Log("error while copying jobs to ds: ", err)

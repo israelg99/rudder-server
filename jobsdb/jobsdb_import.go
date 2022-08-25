@@ -18,7 +18,11 @@ func (jd *HandleT) SetupForImport() {
 
 func (jd *HandleT) getDsForImport(l lock.DSListLockToken) dataSetT {
 	ds := newDataSet(jd.tablePrefix, jd.computeNewIdxForInterNodeMigration(l, jd.migrationState.dsForNewEvents))
-	jd.addDS(ds)
+	err := jd.WithTx(func(tx *sql.Tx) error {
+		return jd.addNewDSInTx(tx, ds, l)
+	})
+	jd.assertError(err)
+	_ = jd.refreshDSRangeList(l)
 	jd.logger.Infof("[[ %s-JobsDB Import ]] Should Checkpoint Import Setup event for the new ds : %v", jd.GetTablePrefix(), ds)
 	return ds
 }
@@ -72,7 +76,11 @@ func (jd *HandleT) StoreJobsAndCheckpoint(jobList []*JobT, migrationCheckpoint M
 	} else if jd.checkIfFullDS(jd.migrationState.dsForImport) {
 		jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
 			jd.migrationState.dsForImport = newDataSet(jd.tablePrefix, jd.computeNewIdxForInterNodeMigration(l, jd.migrationState.dsForNewEvents))
-			jd.addDS(jd.migrationState.dsForImport)
+			err := jd.WithTx(func(tx *sql.Tx) error {
+				return jd.addNewDSInTx(tx, jd.migrationState.dsForImport, l)
+			})
+			jd.assertError(err)
+			_ = jd.refreshDSRangeList(l)
 			setupCheckpoint, found := jd.GetSetupCheckpoint(ImportOp)
 			jd.assert(found, "There should be a setup checkpoint at this point. If not something went wrong. Go debug")
 			setupCheckpoint.Payload, _ = json.Marshal(jd.migrationState.dsForImport)
@@ -162,7 +170,11 @@ func (jd *HandleT) updateSequenceNumberOfLatestDSWithLock(l lock.DSListLockToken
 		ds = dsList[dsListLen-1]
 	} else {
 		ds = newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l))
-		jd.addNewDS(l, ds)
+		err := jd.WithTx(func(tx *sql.Tx) error {
+			return jd.addNewDSInTx(tx, ds, l)
+		})
+		jd.assertError(err)
+		_ = jd.refreshDSRangeList(l)
 	}
 
 	var serialInt sql.NullInt64

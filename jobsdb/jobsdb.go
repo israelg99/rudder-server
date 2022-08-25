@@ -116,7 +116,10 @@ type statTags struct {
 	StateFilters     []string
 }
 
-var getTimeNowFunc = time.Now
+var (
+	getTimeNowFunc         = time.Now
+	createDSAdvisoryLockNo = 11
+)
 
 // StoreSafeTx sealed interface
 type StoreSafeTx interface {
@@ -991,7 +994,11 @@ func (jd *HandleT) writerSetup(ctx context.Context, l lock.DSListLockToken) {
 	jd.refreshDSRangeList(l)
 	// If no DS present, add one
 	if len(jd.getDSList()) == 0 {
-		jd.addNewDS(l, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)))
+		err := jd.WithTx(func(tx *sql.Tx) error {
+			return jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)), l)
+		})
+		jd.assertError(err)
+		_ = jd.refreshDSRangeList(l)
 	}
 
 	jd.backgroundGroup.Go(misc.WithBugsnag(func() error {
@@ -1289,26 +1296,40 @@ func newDataSet(tablePrefix, dsIdx string) dataSetT {
 	}
 }
 
-func (jd *HandleT) addNewDS(l lock.DSListLockToken, ds dataSetT) {
+// NOTE: If addNewDSInTx is directly called, make sure to explicitly call refreshDSRangeList(l) to update the DS list in cache, once transaction has completed.
+func (jd *HandleT) addNewDSInTx(tx *sql.Tx, ds dataSetT, l lock.DSListLockToken) error {
 	jd.logger.Infof("Creating new DS %+v", ds)
 	queryStat := stats.NewTaggedStat("add_new_ds", stats.TimerType, stats.Tags{"customVal": jd.tablePrefix})
 	queryStat.Start()
 	defer queryStat.End()
-	jd.createDS(ds, l)
+	err := jd.createDSInTx(tx, ds)
+	if err != nil {
+		return err
+	}
+	if l != nil {
+		err = jd.setSequenceNumberInTx(tx, ds.Index)
+		if err != nil {
+			return err
+		}
+	}
 	// Tracking time interval between new ds creations. Hence calling end before start
 	if jd.isStatNewDSPeriodInitialized {
 		jd.statNewDSPeriod.End()
 	}
 	jd.statNewDSPeriod.Start()
 	jd.isStatNewDSPeriodInitialized = true
+
+	return nil
 }
 
-func (jd *HandleT) addDS(ds dataSetT) {
+func (jd *HandleT) addDS(ds dataSetT) error {
 	jd.logger.Infof("Creating DS %+v", ds)
 	queryStat := stats.NewTaggedStat("add_new_ds", stats.TimerType, stats.Tags{"customVal": jd.tablePrefix})
 	queryStat.Start()
 	defer queryStat.End()
-	jd.createDS(ds, nil)
+	return jd.WithTx(func(tx *sql.Tx) error {
+		return jd.createDSInTx(tx, ds)
+	})
 }
 
 func (jd *HandleT) computeNewIdxForAppend(l lock.DSListLockToken) string {
@@ -1512,21 +1533,7 @@ type transactionHandler interface {
 	// Only the function that passes *sql.Tx should do the commit or rollback based on the error it receives
 }
 
-func (jd *HandleT) createDS(newDS dataSetT, l lock.DSListLockToken) {
-	err := jd.WithTx(func(tx *sql.Tx) error {
-		return jd.createDSInTx(tx, newDS, l)
-	})
-	jd.assertError(err)
-
-	// In case of a migration, we don't yet update the in-memory list till we finish the migration
-	if l != nil {
-		// to get the updated DS list in the cache after createDS transaction has been committed.
-		_ = jd.refreshDSList(l)
-		_ = jd.refreshDSRangeList(l)
-	}
-}
-
-func (jd *HandleT) createDSInTx(tx *sql.Tx, newDS dataSetT, l lock.DSListLockToken) error {
+func (jd *HandleT) createDSInTx(tx *sql.Tx, newDS dataSetT) error {
 	// Mark the start of operation. If we crash somewhere here, we delete the
 	// DS being added
 	opPayload, err := json.Marshal(&journalOpPayloadT{To: newDS})
@@ -1583,13 +1590,6 @@ func (jd *HandleT) createDSInTx(tx *sql.Tx, newDS dataSetT, l lock.DSListLockTok
 		return err
 	}
 
-	if l != nil {
-		err = jd.setSequenceNumberInTx(tx, l, newDS.Index)
-		if err != nil {
-			return err
-		}
-	}
-
 	err = jd.journalMarkDoneInTx(tx, opID)
 	if err != nil {
 		return err
@@ -1598,7 +1598,7 @@ func (jd *HandleT) createDSInTx(tx *sql.Tx, newDS dataSetT, l lock.DSListLockTok
 	return nil
 }
 
-func (jd *HandleT) setSequenceNumberInTx(tx *sql.Tx, l lock.DSListLockToken, newDSIdx string) error {
+func (jd *HandleT) setSequenceNumberInTx(tx *sql.Tx, newDSIdx string) error {
 	dList := jd.getDSList()
 	var maxID sql.NullInt64
 
@@ -3025,20 +3025,38 @@ func (jd *HandleT) addNewDSLoop(ctx context.Context) {
 		case <-jd.TriggerAddNewDS():
 		}
 
-		jd.logger.Debugf("[[ %s : addNewDSLoop ]]: Start", jd.tablePrefix)
-		jd.dsListLock.RLock()
-		dsList := jd.getDSList()
-		jd.dsListLock.RUnlock()
-		latestDS := dsList[len(dsList)-1]
-		if jd.checkIfFullDS(latestDS) {
-			// Adding a new DS updates the list
-			// Doesn't move any data so we only
-			// take the list lock
-			jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
-				jd.logger.Infof("[[ %s : addNewDSLoop ]]: NewDS", jd.tablePrefix)
-				jd.addNewDS(l, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)))
+		// Adding a new DS only creates a new DS & updates the cache. It doesn't move any data so we only take the list lock.
+		jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
+			// start a transaction
+			err := jd.WithTx(func(tx *sql.Tx) error {
+				// acquire a advisory transaction level blocking lock, which cancels once the transaction ends.
+				sqlStatement := fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d);`, createDSAdvisoryLockNo)
+				_, err := tx.ExecContext(context.TODO(), sqlStatement)
+				if err != nil {
+					return err
+				}
+
+				// refresh ds list
+				var dsList []dataSetT
+				var nextDSIdx string
+				dsList = jd.refreshDSList(l)
+				nextDSIdx = jd.computeNewIdxForAppend(l)
+				latestDS := dsList[len(dsList)-1]
+
+				// checkIfFullDS is true for last DS in the list
+				if jd.checkIfFullDS(latestDS) {
+					jd.logger.Infof("[[ %s : addNewDSLoop ]]: NewDS", jd.tablePrefix)
+					if err := jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, nextDSIdx), l); err != nil {
+						return err
+					}
+				}
+				return nil
 			})
-		}
+			jd.assertError(err)
+
+			// to get the updated DS list in the cache after createDS transaction has been committed.
+			_ = jd.refreshDSRangeList(l)
+		})
 	}
 }
 
@@ -3137,7 +3155,8 @@ func (jd *HandleT) migrateDSLoop(ctx context.Context) {
 					jd.assertError(err)
 					opID = jd.JournalMarkStart(migrateCopyOperation, opPayload)
 
-					jd.addDS(migrateTo)
+					err = jd.addDS(migrateTo)
+					jd.assertError(err)
 					jd.inProgressMigrationTargetDS = &migrateTo
 				})
 
