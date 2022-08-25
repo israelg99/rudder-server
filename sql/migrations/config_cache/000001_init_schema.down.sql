@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS config_cache;
+
+DROP EXTENSION IF EXISTS "pgcrypto";

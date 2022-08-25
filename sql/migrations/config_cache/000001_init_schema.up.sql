@@ -1,0 +1,8 @@
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS config_cache (
+		key TEXT NOT NULL PRIMARY KEY,
+		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		config bytea NOT NULL
+);

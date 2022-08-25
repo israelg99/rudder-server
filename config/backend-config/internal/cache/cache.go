@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 
+	"github.com/rudderlabs/rudder-server/config"
+	migrator "github.com/rudderlabs/rudder-server/services/sql-migrator"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
 	"github.com/rudderlabs/rudder-server/utils/pubsub"
@@ -46,6 +48,21 @@ func Start(ctx context.Context, secret, key string, ch pubsub.DataChannel) Cache
 		pkgLogger.Errorf("failed to setup db: %v", err)
 		return &dbStore
 	}
+
+	// apply migrations
+	err = migrate(dbConn)
+	if err != nil {
+		pkgLogger.Errorf("failed to migrate db: %v", err)
+		return &dbStore
+	}
+
+	// clear config for other keys
+	err = dbStore.clear(ctx)
+	if err != nil {
+		pkgLogger.Errorf("failed to clear previous config: %v", err)
+		return &dbStore
+	}
+
 	go func() {
 		// subscribe to config and write to db
 		for config := range ch {
@@ -118,22 +135,40 @@ func setupDBConn() (*sql.DB, error) {
 		pkgLogger.Errorf("failed to ping db: %v", err)
 		return nil, err
 	}
-	// create table if it doesn't exist
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS config_cache (
-		key TEXT NOT NULL PRIMARY KEY,
-		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-		config bytea NOT NULL
-	)`)
-	if err != nil {
-		pkgLogger.Errorf("failed to create table: %v", err)
-		return nil, err
-	}
-	// create encryption extension pgcrypto
-	_, err = db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
-	if err != nil {
-		pkgLogger.Errorf("failed to create extension: %v", err)
-		return nil, err
-	}
+	// // create table if it doesn't exist
+	// _, err = db.Exec(`CREATE TABLE IF NOT EXISTS config_cache (
+	// 	key TEXT NOT NULL PRIMARY KEY,
+	// 	created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	// 	updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	// 	config bytea NOT NULL
+	// )`)
+	// if err != nil {
+	// 	pkgLogger.Errorf("failed to create table: %v", err)
+	// 	return nil, err
+	// }
+	// // create encryption extension pgcrypto
+	// _, err = db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
+	// if err != nil {
+	// 	pkgLogger.Errorf("failed to create extension: %v", err)
+	// 	return nil, err
+	// }
 	return db, nil
+}
+
+// clear config for all other keys
+func (db *cacheStore) clear(ctx context.Context) error {
+	_, err := db.ExecContext(ctx, `DELETE FROM config_cache WHERE key != $1`, db.key)
+	return err
+}
+
+// apply config_cache migrations to the database
+func migrate(db *sql.DB) error {
+	m := &migrator.Migrator{
+		Handle:                     db,
+		MigrationsTable:            "config_cache_migrations",
+		ShouldForceSetLowerVersion: config.GetBool("SQLMigrator.forceSetLowerVersion", true),
+	}
+
+	return m.Migrate("config_cache")
+
 }
