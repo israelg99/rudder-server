@@ -170,5 +170,4 @@ func migrate(db *sql.DB) error {
 	}
 
 	return m.Migrate("config_cache")
-
 }
