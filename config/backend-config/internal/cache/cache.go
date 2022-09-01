@@ -135,23 +135,6 @@ func setupDBConn() (*sql.DB, error) {
 		pkgLogger.Errorf("failed to ping db: %v", err)
 		return nil, err
 	}
-	// // create table if it doesn't exist
-	// _, err = db.Exec(`CREATE TABLE IF NOT EXISTS config_cache (
-	// 	key TEXT NOT NULL PRIMARY KEY,
-	// 	created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-	// 	updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-	// 	config bytea NOT NULL
-	// )`)
-	// if err != nil {
-	// 	pkgLogger.Errorf("failed to create table: %v", err)
-	// 	return nil, err
-	// }
-	// // create encryption extension pgcrypto
-	// _, err = db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
-	// if err != nil {
-	// 	pkgLogger.Errorf("failed to create extension: %v", err)
-	// 	return nil, err
-	// }
 	return db, nil
 }
 

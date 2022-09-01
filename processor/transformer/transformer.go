@@ -81,6 +81,7 @@ type HandleT struct {
 	perfStats    *misc.PerfStats
 	sentStat     stats.RudderStats
 	receivedStat stats.RudderStats
+	cpDownGauge  stats.RudderStats
 
 	logger logger.LoggerI
 
@@ -143,6 +144,7 @@ func (trans *HandleT) Setup() {
 	trans.logger = pkgLogger
 	trans.sentStat = stats.DefaultStats.NewStat("processor.transformer_sent", stats.CountType)
 	trans.receivedStat = stats.DefaultStats.NewStat("processor.transformer_received", stats.CountType)
+	trans.cpDownGauge = stats.DefaultStats.NewStat("processor.control_plane_down_gauge", stats.GaugeType)
 
 	trans.guardConcurrency = make(chan struct{}, maxConcurrency)
 	trans.perfStats = &misc.PerfStats{}
@@ -310,21 +312,24 @@ func (trans *HandleT) request(ctx context.Context, url string, data []Transforme
 	)
 
 	// endless retry if transformer-controlplane connection is down
-	outerBackoff := backoff.NewExponentialBackOff()
-	outerBackoff.MaxElapsedTime = 0
+	endlessBackoff := backoff.NewExponentialBackOff()
+	endlessBackoff.MaxElapsedTime = 0 // no max time -> ends only when no error
 	// endless backoff loop, only nil error or panics inside
 	_ = backoff.RetryNotify(
 		func() error {
 			respData, statusCode = trans.doPost(ctx, rawJSON, url, statsTags(data[0]))
 			if statusCode == StatusCPDown {
+				trans.cpDownGauge.Gauge(1)
 				return fmt.Errorf("control plane not reachable")
 			}
 			return nil
 		},
-		outerBackoff,
+		endlessBackoff,
 		func(err error, t time.Duration) {
 			trans.logger.Errorf("JS HTTP connection error: URL: %v Error: %+v", url, err)
 		})
+	// control plane back up
+	trans.cpDownGauge.Gauge(0)
 
 	// Remove Assertion?
 	if !(statusCode == http.StatusOK ||
