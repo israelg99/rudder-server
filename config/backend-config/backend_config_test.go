@@ -6,22 +6,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"os/signal"
 	"reflect"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/rudderlabs/rudder-server/config"
@@ -100,77 +94,77 @@ var (
 	db   *sql.DB
 )
 
-func TestMain(m *testing.M) {
-	flag.BoolVar(&hold, "hold", false, "hold environment clean-up after test execution until Ctrl+C is provided")
-	flag.Parse()
+// func TestMain(m *testing.M) {
+// 	flag.BoolVar(&hold, "hold", false, "hold environment clean-up after test execution until Ctrl+C is provided")
+// 	flag.Parse()
 
-	// hack to make defer work, without being affected by the os.Exit in TestMain
-	os.Exit(run(m))
-}
+// 	// hack to make defer work, without being affected by the os.Exit in TestMain
+// 	os.Exit(run(m))
+// }
 
-func run(m *testing.M) int {
-	// set up database
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		log.Printf("Could not connect to docker: %s\n", err)
-		return 1
-	}
-	database := "jobsdb"
-	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
-		"POSTGRES_PASSWORD=password",
-		"POSTGRES_DB=" + database,
-		"POSTGRES_USER=rudder",
-	})
-	if err != nil {
-		log.Printf("Could not start resource: %s\n", err)
-	}
-	defer func() {
-		if err := pool.Purge(resourcePostgres); err != nil {
-			log.Printf("Could not purge resource: %s \n", err)
-		}
-	}()
-	port := resourcePostgres.GetPort("5432/tcp")
-	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
-	fmt.Println("DB_DSN:", DB_DSN)
-	os.Setenv("JOBS_DB_DB_NAME", database)
-	os.Setenv("JOBS_DB_HOST", "localhost")
-	os.Setenv("JOBS_DB_NAME", database)
-	os.Setenv("JOBS_DB_USER", "rudder")
-	os.Setenv("JOBS_DB_PASSWORD", "password")
-	os.Setenv("JOBS_DB_PORT", port)
+// func run(m *testing.M) int {
+// 	// set up database
+// 	pool, err := dockertest.NewPool("")
+// 	if err != nil {
+// 		log.Printf("Could not connect to docker: %s\n", err)
+// 		return 1
+// 	}
+// 	database := "jobsdb"
+// 	resourcePostgres, err := pool.Run("postgres", "11-alpine", []string{
+// 		"POSTGRES_PASSWORD=password",
+// 		"POSTGRES_DB=" + database,
+// 		"POSTGRES_USER=rudder",
+// 	})
+// 	if err != nil {
+// 		log.Printf("Could not start resource: %s\n", err)
+// 	}
+// 	defer func() {
+// 		if err := pool.Purge(resourcePostgres); err != nil {
+// 			log.Printf("Could not purge resource: %s \n", err)
+// 		}
+// 	}()
+// 	port := resourcePostgres.GetPort("5432/tcp")
+// 	DB_DSN := fmt.Sprintf("postgres://rudder:password@localhost:%s/%s?sslmode=disable", port, database)
+// 	fmt.Println("DB_DSN:", DB_DSN)
+// 	os.Setenv("JOBS_DB_DB_NAME", database)
+// 	os.Setenv("JOBS_DB_HOST", "localhost")
+// 	os.Setenv("JOBS_DB_NAME", database)
+// 	os.Setenv("JOBS_DB_USER", "rudder")
+// 	os.Setenv("JOBS_DB_PASSWORD", "password")
+// 	os.Setenv("JOBS_DB_PORT", port)
 
-	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-	if err := pool.Retry(func() error {
-		var err error
-		db, err = sql.Open("postgres", DB_DSN)
-		if err != nil {
-			return err
-		}
-		return db.Ping()
-	}); err != nil {
-		log.Printf("Could not connect to docker: %s\n", err)
-		return 1
-	}
+// 	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+// 	if err := pool.Retry(func() error {
+// 		var err error
+// 		db, err = sql.Open("postgres", DB_DSN)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		return db.Ping()
+// 	}); err != nil {
+// 		log.Printf("Could not connect to docker: %s\n", err)
+// 		return 1
+// 	}
 
-	code := m.Run()
-	blockOnHold()
+// 	code := m.Run()
+// 	blockOnHold()
 
-	return code
-}
+// 	return code
+// }
 
-func blockOnHold() {
-	if !hold {
-		return
-	}
+// func blockOnHold() {
+// 	if !hold {
+// 		return
+// 	}
 
-	fmt.Println("Test on hold, before cleanup")
-	fmt.Println("Press Ctrl+C to exit")
+// 	fmt.Println("Test on hold, before cleanup")
+// 	fmt.Println("Press Ctrl+C to exit")
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+// 	c := make(chan os.Signal, 1)
+// 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	<-c
-}
+// 	<-c
+// }
 
 func TestBadResponse(t *testing.T) {
 	initBackendConfig()
@@ -204,15 +198,27 @@ func TestBadResponse(t *testing.T) {
 
 	for name, conf := range configs {
 		t.Run(name, func(t *testing.T) {
-			ctx := context.Background()
+			ctrl := gomock.NewController(t)
 			pkgLogger = logger.NewLogger()
 			atomic.StoreInt32(&calls, 0)
-
+			ctx, cancel := context.WithCancel(context.Background())
+			cacheStore := cache.NewMockCache(ctrl)
 			bc := &backendConfigImpl{
 				workspaceConfig: conf,
 				eb:              pubsub.New(),
+				cache:           cacheStore,
 			}
-			bc.StartWithIDs(ctx, "")
+			bc.ctx = ctx
+			bc.cancel = cancel
+			bc.blockChan = make(chan struct{})
+			// var startCache func(context.Context, string, *backendConfigImpl) = func(_ context.Context, _ string, bcI *backendConfigImpl) {
+			// 	_ = bcI.AccessToken()
+			// 	bcI.cache = cacheStore
+			// }
+			// cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(gomock.Any(), nil).Times(1)
+
+			// startCache(ctx, "", bc)
+			bc.startWithIDs(ctx, "")
 			go bc.WaitForConfig(ctx)
 
 			timeout := time.NewTimer(3 * time.Second)
@@ -231,6 +237,7 @@ func TestBadResponse(t *testing.T) {
 }
 
 func TestNewForDeployment(t *testing.T) {
+	initBackendConfig()
 	t.Run("dedicated", func(t *testing.T) {
 		t.Setenv("WORKSPACE_TOKEN", "foobar")
 		conf, err := newForDeployment(deployment.DedicatedType, nil)

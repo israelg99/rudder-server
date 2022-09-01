@@ -302,12 +302,28 @@ func (bc *backendConfigImpl) StartWithIDs(ctx context.Context, workspaces string
 	bc.ctx = ctx
 	bc.cancel = cancel
 	bc.blockChan = make(chan struct{})
-	cacheKey := fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))) // using a fixed size key	// skipcq: GSC-G401, GO-S1025
-	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
+	startCache(ctx, workspaces, bc)
+	bc.startWithIDs(ctx, workspaces)
+}
+
+func (bc *backendConfigImpl) startWithIDs(ctx context.Context, workspaces string) {
 	rruntime.Go(func() {
 		bc.pollConfigUpdate(ctx, workspaces)
 		close(bc.blockChan)
 	})
+}
+
+var startCache func(
+	context.Context,
+	string,
+	*backendConfigImpl,
+) = func(
+	ctx context.Context,
+	workspaces string,
+	bc *backendConfigImpl,
+) {
+	cacheKey := fmt.Sprintf(`%x`, sha1.Sum([]byte(workspaces))) // using a fixed size key	// skipcq: GSC-G401, GO-S1025
+	bc.cache = cache.Start(ctx, bc.AccessToken(), cacheKey, bc.Subscribe(ctx, TopicBackendConfig))
 }
 
 func (bc *backendConfigImpl) Stop() {
