@@ -2,6 +2,7 @@ package warehouse
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,6 +89,10 @@ type UploadAPIT struct {
 	log               logger.LoggerI
 	connectionManager *controlplane.ConnectionManager
 	isHosted          bool
+}
+
+type ValidateObjectRequestT struct {
+	body string
 }
 
 var UploadAPI UploadAPIT
@@ -615,4 +620,22 @@ func (uploadsReq *UploadsReqT) getWhUploads(authorizedSourceIDs []string, select
 		},
 	}
 	return
+}
+
+func (validateObjectStorageRequest *ValidateObjectRequestT) validateObjectStorage() (validateObjectStorageResp *proto.ValidateObjectStorageResponse, err error) {
+	var requestMap map[string]interface{}
+
+	// Unmarshal or Decode the JSON to the interface.
+	json.Unmarshal([]byte(validateObjectStorageRequest.body), &requestMap)
+	typeOfObjectStorage := fmt.Sprint(requestMap["type"])
+	switch strings.ToUpper(typeOfObjectStorage) {
+	case "GCS":
+
+	case "AZURE_BLOB":
+	case "MINIO":
+	case "S3":
+	default:
+
+	}
+	return nil, err
 }
