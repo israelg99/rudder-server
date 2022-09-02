@@ -89,10 +89,7 @@ var sampleBackendConfig2 = ConfigT{
 	},
 }
 
-var (
-	hold bool
-	db   *sql.DB
-)
+var db *sql.DB
 
 // func TestMain(m *testing.M) {
 // 	flag.BoolVar(&hold, "hold", false, "hold environment clean-up after test execution until Ctrl+C is provided")
@@ -211,11 +208,8 @@ func TestBadResponse(t *testing.T) {
 			bc.ctx = ctx
 			bc.cancel = cancel
 			bc.blockChan = make(chan struct{})
-			// var startCache func(context.Context, string, *backendConfigImpl) = func(_ context.Context, _ string, bcI *backendConfigImpl) {
-			// 	_ = bcI.AccessToken()
-			// 	bcI.cache = cacheStore
-			// }
-			// cacheStore.EXPECT().Get(gomock.Eq(ctx)).Return(gomock.Any(), nil).Times(1)
+
+			cacheStore.EXPECT().Get(gomock.Any()).Return([]byte{}, nil).AnyTimes()
 
 			// startCache(ctx, "", bc)
 			bc.startWithIDs(ctx, "")
