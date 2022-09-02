@@ -116,10 +116,7 @@ type statTags struct {
 	StateFilters     []string
 }
 
-var (
-	getTimeNowFunc         = time.Now
-	createDSAdvisoryLockNo = 11
-)
+var getTimeNowFunc = time.Now
 
 // StoreSafeTx sealed interface
 type StoreSafeTx interface {
@@ -994,11 +991,7 @@ func (jd *HandleT) writerSetup(ctx context.Context, l lock.DSListLockToken) {
 	jd.refreshDSRangeList(l)
 	// If no DS present, add one
 	if len(jd.getDSList()) == 0 {
-		err := jd.WithTx(func(tx *sql.Tx) error {
-			return jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)), l)
-		})
-		jd.assertError(err)
-		_ = jd.refreshDSRangeList(l)
+		jd.addNewDS(l, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)))
 	}
 
 	jd.backgroundGroup.Go(misc.WithBugsnag(func() error {
@@ -1218,30 +1211,43 @@ func (jd *HandleT) getTableSize(jobTable string) int64 {
 }
 
 func (jd *HandleT) checkIfFullDS(ds dataSetT) bool {
+	var full bool
+	jd.assertError(jd.WithTx(func(tx *sql.Tx) error {
+		var err error
+		full, err = jd.checkIfFullDSInTx(tx, ds)
+		if err != nil {
+			return err
+		}
+		return nil
+	}))
+	return full
+}
+
+func (jd *HandleT) checkIfFullDSInTx(tx *sql.Tx, ds dataSetT) (bool, error) {
 	var minJobCreatedAt sql.NullTime
 	sqlStatement := fmt.Sprintf(`SELECT MIN(created_at) FROM %q`, ds.JobTable)
-	row := jd.dbHandle.QueryRow(sqlStatement)
+	row := tx.QueryRow(sqlStatement)
 	err := row.Scan(&minJobCreatedAt)
 	if err != nil && err != sql.ErrNoRows {
-		jd.assertError(err)
+		return false, err
 	}
 	if err == nil && minJobCreatedAt.Valid && time.Since(minJobCreatedAt.Time) > jd.MaxDSRetentionPeriod {
-		return true
+		return true, nil
 	}
 
 	tableSize := jd.getTableSize(ds.JobTable)
 	if tableSize > maxTableSize {
 		jd.logger.Infof("[JobsDB] %s is full in size. Count: %v, Size: %v", ds.JobTable, jd.getTableRowCount(ds.JobTable), tableSize)
-		return true
+		return true, nil
 	}
 
 	totalCount := jd.getTableRowCount(ds.JobTable)
 	if totalCount > *jd.MaxDSSize {
 		jd.logger.Infof("[JobsDB] %s is full by rows. Count: %v, Size: %v", ds.JobTable, totalCount, jd.getTableSize(ds.JobTable))
-		return true
+		return true, nil
 	}
 
-	return false
+	return false, nil
 }
 
 /*
@@ -1296,8 +1302,19 @@ func newDataSet(tablePrefix, dsIdx string) dataSetT {
 	}
 }
 
+func (jd *HandleT) addNewDS(l lock.DSListLockToken, ds dataSetT) {
+	err := jd.WithTx(func(tx *sql.Tx) error {
+		return jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, jd.computeNewIdxForAppend(l)), l)
+	})
+	jd.assertError(err)
+	_ = jd.refreshDSRangeList(l)
+}
+
 // NOTE: If addNewDSInTx is directly called, make sure to explicitly call refreshDSRangeList(l) to update the DS list in cache, once transaction has completed.
 func (jd *HandleT) addNewDSInTx(tx *sql.Tx, ds dataSetT, l lock.DSListLockToken) error {
+	if l == nil {
+		return errors.New("nil ds list lock token provided")
+	}
 	jd.logger.Infof("Creating new DS %+v", ds)
 	queryStat := stats.NewTaggedStat("add_new_ds", stats.TimerType, stats.Tags{"customVal": jd.tablePrefix})
 	queryStat.Start()
@@ -1306,11 +1323,9 @@ func (jd *HandleT) addNewDSInTx(tx *sql.Tx, ds dataSetT, l lock.DSListLockToken)
 	if err != nil {
 		return err
 	}
-	if l != nil {
-		err = jd.setSequenceNumberInTx(tx, ds.Index)
-		if err != nil {
-			return err
-		}
+	err = jd.setSequenceNumberInTx(tx, l, ds.Index)
+	if err != nil {
+		return err
 	}
 	// Tracking time interval between new ds creations. Hence calling end before start
 	if jd.isStatNewDSPeriodInitialized {
@@ -1322,18 +1337,22 @@ func (jd *HandleT) addNewDSInTx(tx *sql.Tx, ds dataSetT, l lock.DSListLockToken)
 	return nil
 }
 
-func (jd *HandleT) addDS(ds dataSetT) error {
+func (jd *HandleT) addDS(ds dataSetT) {
 	jd.logger.Infof("Creating DS %+v", ds)
 	queryStat := stats.NewTaggedStat("add_new_ds", stats.TimerType, stats.Tags{"customVal": jd.tablePrefix})
 	queryStat.Start()
 	defer queryStat.End()
-	return jd.WithTx(func(tx *sql.Tx) error {
+	jd.assertError(jd.WithTx(func(tx *sql.Tx) error {
 		return jd.createDSInTx(tx, ds)
-	})
+	}))
 }
 
 func (jd *HandleT) computeNewIdxForAppend(l lock.DSListLockToken) string {
 	dList := jd.refreshDSList(l)
+	return jd.doComputeNewIdxForAppend(dList)
+}
+
+func (jd *HandleT) doComputeNewIdxForAppend(dList []dataSetT) string {
 	newDSIdx := ""
 	if len(dList) == 0 {
 		newDSIdx = "1"
@@ -1598,7 +1617,10 @@ func (jd *HandleT) createDSInTx(tx *sql.Tx, newDS dataSetT) error {
 	return nil
 }
 
-func (jd *HandleT) setSequenceNumberInTx(tx *sql.Tx, newDSIdx string) error {
+func (jd *HandleT) setSequenceNumberInTx(tx *sql.Tx, l lock.DSListLockToken, newDSIdx string) error {
+	if l == nil {
+		return errors.New("nil ds list lock token provided")
+	}
 	dList := jd.getDSList()
 	var maxID sql.NullInt64
 
@@ -3026,37 +3048,45 @@ func (jd *HandleT) addNewDSLoop(ctx context.Context) {
 		}
 
 		// Adding a new DS only creates a new DS & updates the cache. It doesn't move any data so we only take the list lock.
-		jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
-			// start a transaction
-			err := jd.WithTx(func(tx *sql.Tx) error {
-				// acquire a advisory transaction level blocking lock, which cancels once the transaction ends.
-				sqlStatement := fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d);`, createDSAdvisoryLockNo)
-				_, err := tx.ExecContext(context.TODO(), sqlStatement)
-				if err != nil {
+		var dsListLock lock.DSListLockToken
+		var releaseDsListLock chan<- lock.DSListLockToken
+		// start a transaction
+		err := jd.WithTx(func(tx *sql.Tx) error {
+			// acquire a advisory transaction level blocking lock, which is released once the transaction ends.
+			sqlStatement := fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d);`, misc.JobsDBAddDsAdvisoryLock)
+			_, err := tx.ExecContext(context.TODO(), sqlStatement)
+			if err != nil {
+				return err
+			}
+
+			// We acquire the list lock only after we have acquired the advisory lock.
+			// We will release the list lock after the transaction ends, that's why we need to use an async lock
+			dsListLock, releaseDsListLock = jd.dsListLock.AsyncLock()
+			// refresh ds list
+			var dsList []dataSetT
+			var nextDSIdx string
+			// make sure we are operating on the latest version of the list
+			dsList = getDSList(jd, tx, jd.tablePrefix)
+			latestDS := dsList[len(dsList)-1]
+			full, err := jd.checkIfFullDSInTx(tx, latestDS)
+			if err != nil {
+				return err
+			}
+			// checkIfFullDS is true for last DS in the list
+			if full {
+				nextDSIdx = jd.doComputeNewIdxForAppend(dsList)
+				jd.logger.Infof("[[ %s : addNewDSLoop ]]: NewDS", jd.tablePrefix)
+				if err := jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, nextDSIdx), dsListLock); err != nil {
 					return err
 				}
-
-				// refresh ds list
-				var dsList []dataSetT
-				var nextDSIdx string
-				dsList = jd.refreshDSList(l)
-				nextDSIdx = jd.computeNewIdxForAppend(l)
-				latestDS := dsList[len(dsList)-1]
-
-				// checkIfFullDS is true for last DS in the list
-				if jd.checkIfFullDS(latestDS) {
-					jd.logger.Infof("[[ %s : addNewDSLoop ]]: NewDS", jd.tablePrefix)
-					if err := jd.addNewDSInTx(tx, newDataSet(jd.tablePrefix, nextDSIdx), l); err != nil {
-						return err
-					}
-				}
-				return nil
-			})
-			jd.assertError(err)
-
-			// to get the updated DS list in the cache after createDS transaction has been committed.
-			_ = jd.refreshDSRangeList(l)
+			}
+			return nil
 		})
+		jd.assertError(err)
+
+		// to get the updated DS list in the cache after createDS transaction has been committed.
+		_ = jd.refreshDSRangeList(dsListLock)
+		releaseDsListLock <- dsListLock
 	}
 }
 
@@ -3155,8 +3185,7 @@ func (jd *HandleT) migrateDSLoop(ctx context.Context) {
 					jd.assertError(err)
 					opID = jd.JournalMarkStart(migrateCopyOperation, opPayload)
 
-					err = jd.addDS(migrateTo)
-					jd.assertError(err)
+					jd.addDS(migrateTo)
 					jd.inProgressMigrationTargetDS = &migrateTo
 				})
 

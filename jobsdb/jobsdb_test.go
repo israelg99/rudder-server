@@ -588,15 +588,11 @@ func TestRefreshDSList(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, 1, len(jobsDB.getDSList()), "jobsDB should start with a ds list size of 1")
-	// this will throw error if refreshDSList is called without lock
+	jobsDB.addDS(newDataSet("batch_rt", "2"))
+	require.Equal(t, 1, len(jobsDB.getDSList()), "addDS should not refresh the ds list")
 	jobsDB.dsListLock.WithLock(func(l lock.DSListLockToken) {
-		err = jobsDB.WithTx(func(tx *sql.Tx) error {
-			return jobsDB.addNewDSInTx(tx, newDataSet("batch_rt", "2"), l)
-		})
-		_ = jobsDB.refreshDSRangeList(l)
+		require.Equal(t, 2, len(jobsDB.refreshDSList(l)), "after refreshing the ds list jobsDB should have a ds list size of 2")
 	})
-	require.NoError(t, err)
-	require.Equal(t, 2, len(jobsDB.getDSList()), "addDS should return 2 after refreshing the ds list")
 }
 
 func TestJobsDBTimeout(t *testing.T) {
