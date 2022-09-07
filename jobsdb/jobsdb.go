@@ -56,7 +56,13 @@ import (
 	"github.com/lib/pq"
 )
 
-const preDropTablePrefix = "pre_drop_"
+const (
+	preDropTablePrefix               = "pre_drop_"
+	lockTableInsertExceptionFuncName = "lock_table_insert_exception"
+	lockTableInsertExceptionMsg      = "lockTableInsertException"
+	lockTableInsertExceptionCode     = "ZZ999"
+	postgresDuplicateFuncErr         = "42723"
+)
 
 // backupSettings is for capturing the backup
 // configuration from the config/env files to
@@ -436,7 +442,6 @@ type HandleT struct {
 	backgroundGroup               *errgroup.Group
 	maxBackupRetryTime            time.Duration
 	preBackupHandlers             []prebackup.Handler
-
 	// skipSetupDBSetup is useful for testing as we mock the database client
 	// TODO: Remove this flag once we have test setup that uses real database
 	skipSetupDBSetup bool
@@ -2373,8 +2378,21 @@ func (jd *HandleT) doStoreJobsInTx(ctx context.Context, tx *sql.Tx, ds dataSetT,
 		return err
 	}
 	err := store()
+
 	var e *pq.Error
 	if err != nil && errors.As(err, &e) {
+
+		if e.Code == lockTableInsertExceptionCode {
+			var updatedList []dataSetT
+			jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
+				updatedList = jd.refreshDSList(l)
+			})
+			ds = updatedList[len(updatedList)-1]
+			if err = store(); err != nil {
+				_ = errors.As(err, &e)
+			}
+		}
+
 		if _, ok := dbInvalidJsonErrors[string(e.Code)]; ok {
 			if _, err := tx.ExecContext(ctx, rollbackSql); err != nil {
 				return err
@@ -2389,27 +2407,40 @@ func (jd *HandleT) doStoreJobsInTx(ctx context.Context, tx *sql.Tx, ds dataSetT,
 }
 
 func (jd *HandleT) storeJob(ctx context.Context, tx *sql.Tx, ds dataSetT, job *JobT) (err error) {
-	sqlStatement := fmt.Sprintf(`INSERT INTO %q (uuid, user_id, custom_val, parameters, event_payload, workspace_id)
-	                                   VALUES ($1, $2, $3, $4, $5, $6) RETURNING job_id`, ds.JobTable)
-	stmt, err := tx.PrepareContext(ctx, sqlStatement)
-	jd.assertError(err)
-	defer func() { _ = stmt.Close() }()
-	job.sanitizeJson()
-	_, err = stmt.ExecContext(ctx, job.UUID, job.UserID, job.CustomVal, string(job.Parameters), string(job.EventPayload), job.WorkspaceId)
-	if err == nil {
-		// Empty customValFilters means we want to clear for all
-		jd.markClearEmptyResult(ds, allWorkspaces, []string{}, []string{}, nil, hasJobs, nil)
-		jd.markClearEmptyResult(ds, job.WorkspaceId, []string{}, []string{}, nil, hasJobs, nil)
-		// fmt.Println("Bursting CACHE")
-		return
+	storeEach := func() error {
+		sqlStatement := fmt.Sprintf(`INSERT INTO %q (uuid, user_id, custom_val, parameters, event_payload, workspace_id)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING job_id`, ds.JobTable)
+		stmt, err := tx.PrepareContext(ctx, sqlStatement)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		job.sanitizeJson()
+		_, err = stmt.ExecContext(ctx, job.UUID, job.UserID, job.CustomVal, string(job.Parameters), string(job.EventPayload), job.WorkspaceId)
+		return err
 	}
-	pqErr, ok := err.(*pq.Error)
-	if ok {
-		errCode := string(pqErr.Code)
+
+	var e *pq.Error
+	if err != nil && errors.As(err, &e) {
+		if e.Code == lockTableInsertExceptionCode {
+			var updatedList []dataSetT
+			jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
+				updatedList = jd.refreshDSList(l)
+			})
+			ds = updatedList[len(updatedList)-1]
+			if err = storeEach(); err != nil {
+				_ = errors.As(err, &e)
+			}
+		}
+		errCode := string(e.Code)
 		if _, ok := dbInvalidJsonErrors[errCode]; ok {
 			return errors.New("invalid JSON")
 		}
 	}
+
+	// Empty customValFilters means we want to clear for all
+	jd.markClearEmptyResult(ds, allWorkspaces, []string{}, []string{}, nil, hasJobs, nil)
+	jd.markClearEmptyResult(ds, job.WorkspaceId, []string{}, []string{}, nil, hasJobs, nil)
 	return
 }
 
@@ -3031,7 +3062,30 @@ func (jd *HandleT) updateJobStatusDSInTx(ctx context.Context, tx *sql.Tx, ds dat
 	return
 }
 
-/**
+func (jd *HandleT) createExceptionFunction() error {
+	sqlStatement := fmt.Sprintf(`
+	CREATE FUNCTION %s  	
+	RETURNS trigger
+	AS
+	$$
+	BEGIN RAISE EXCEPTION '%s' USING ERRCODE = '%s';
+	END;
+	$$
+	LANGUAGE plpgsql;`, fmt.Sprintf("%s()", lockTableInsertExceptionFuncName), lockTableInsertExceptionMsg, lockTableInsertExceptionCode)
+
+	_, err := jd.dbHandle.Exec(sqlStatement)
+
+	var e *pq.Error
+	if err != nil && errors.As(err, &e) {
+		if e.Code == postgresDuplicateFuncErr {
+			return nil
+		}
+	}
+	return err
+}
+
+/*
+*
 The next set of functions are the user visible functions to get/set job status.
 For reading jobs, it scans from the oldest DS to the latest till it has found
 enough jobs. For updating status, it finds the DS to which the job belongs
@@ -3054,10 +3108,9 @@ Store() only needs to access the last element of dsList and is not
 impacted by movement of data across ds so it only takes the dsListLock.
 Other functions are impacted by movement of data across DS in background
 so take both the list and data lock
-
 */
-
 func (jd *HandleT) addNewDSLoop(ctx context.Context) {
+	jd.assertError(jd.createExceptionFunction())
 	for {
 		select {
 		case <-ctx.Done():
@@ -3074,7 +3127,7 @@ func (jd *HandleT) addNewDSLoop(ctx context.Context) {
 			sqlStatement := fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d);`, misc.JobsDBAddDsAdvisoryLock)
 			_, err := tx.ExecContext(context.TODO(), sqlStatement)
 			if err != nil {
-				return err
+				return fmt.Errorf("error while acquiring advisory lock %d: %w", misc.JobsDBAddDsAdvisoryLock, err)
 			}
 
 			// We acquire the list lock only after we have acquired the advisory lock.
@@ -3088,14 +3141,23 @@ func (jd *HandleT) addNewDSLoop(ctx context.Context) {
 			latestDS := dsList[len(dsList)-1]
 			full, err := jd.checkIfFullDSInTx(tx, latestDS)
 			if err != nil {
-				return err
+				return fmt.Errorf("error while checking if DS is full: %w", err)
 			}
 			// checkIfFullDS is true for last DS in the list
 			if full {
+				if _, err = tx.Exec(fmt.Sprintf(`LOCK TABLE %q IN EXCLUSIVE MODE;`, latestDS.JobTable)); err != nil {
+					return fmt.Errorf("error locking table %s: %w", latestDS.JobTable, err)
+				}
+
 				nextDSIdx = jd.doComputeNewIdxForAppend(dsList)
 				jd.logger.Infof("[[ %s : addNewDSLoop ]]: NewDS", jd.tablePrefix)
-				if err := jd.addNewDSInTx(tx, dsListLock, dsList, newDataSet(jd.tablePrefix, nextDSIdx)); err != nil {
-					return err
+				if err = jd.addNewDSInTx(tx, dsListLock, dsList, newDataSet(jd.tablePrefix, nextDSIdx)); err != nil {
+					return fmt.Errorf("error adding new DS: %w", err)
+				}
+
+				// create exception trigger on last full table
+				if err = jd.createTrigger(tx, latestDS); err != nil {
+					return fmt.Errorf("error creating trigger: %w", err)
 				}
 			}
 			return nil
@@ -3106,6 +3168,17 @@ func (jd *HandleT) addNewDSLoop(ctx context.Context) {
 		jd.refreshDSRangeList(dsListLock)
 		releaseDsListLock <- dsListLock
 	}
+}
+
+func (jd *HandleT) createTrigger(tx *sql.Tx, latestDS dataSetT) error {
+	sqlStatement := fmt.Sprintf(
+		`CREATE TRIGGER lockTableInsertExceptionTrigger
+		BEFORE INSERT
+		ON %q
+		FOR EACH STATEMENT
+		EXECUTE PROCEDURE %s;`, latestDS.JobTable, fmt.Sprintf("%s()", lockTableInsertExceptionFuncName))
+	_, err := tx.Exec(sqlStatement)
+	return err
 }
 
 func (jd *HandleT) refreshDSListLoop(ctx context.Context) {

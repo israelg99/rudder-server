@@ -15,6 +15,7 @@ import (
 	"time"
 
 	uuid "github.com/gofrs/uuid"
+	"github.com/lib/pq"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/ory/dockertest/v3"
@@ -796,4 +797,85 @@ func TestThreadSafeAddNewDSLoop(t *testing.T) {
 		},
 		time.Second, time.Millisecond,
 		"expected only one DS to be added, even though both jobsDB-1 & jobsDB-2 are triggered to add new DS (dsLen1: %d, dsLen2: %d)", dsLen1, dsLen2)
+}
+
+func TestThreadSafeJobStorage(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err, "Failed to create docker pool")
+	cleanup := &testhelper.Cleanup{}
+	defer cleanup.Run()
+
+	postgresResource, err := destination.SetupPostgres(pool, cleanup)
+	require.NoError(t, err)
+
+	{
+		t.Setenv("JOBS_DB_DB_NAME", postgresResource.Database)
+		t.Setenv("JOBS_DB_NAME", postgresResource.Database)
+		t.Setenv("JOBS_DB_HOST", postgresResource.Host)
+		t.Setenv("JOBS_DB_PORT", postgresResource.Port)
+		t.Setenv("JOBS_DB_USER", postgresResource.User)
+		t.Setenv("JOBS_DB_PASSWORD", postgresResource.Password)
+		initJobsDB()
+		stats.Setup()
+	}
+
+	migrationMode := ""
+	maxDSSize := 1
+	triggerAddNewDS := make(chan time.Time)
+	queryFilters := QueryFiltersT{
+		CustomVal: true,
+	}
+	jobsDB := &HandleT{
+		TriggerAddNewDS: func() <-chan time.Time {
+			return triggerAddNewDS
+		},
+		MaxDSSize: &maxDSSize,
+	}
+	err = jobsDB.Setup(ReadWrite, false, "test", migrationMode, true, queryFilters, []prebackup.Handler{})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(jobsDB.getDSList()), "expected cache to be auto-updated with DS list length 1")
+
+	generateJobs := func(numOfJob int) []*JobT {
+		customVal := "MOCKDS"
+		js := make([]*JobT, numOfJob)
+		for i := 0; i < numOfJob; i++ {
+			js[i] = &JobT{
+				Parameters:   []byte(`{"batch_id":1,"source_id":"sourceID","source_job_run_id":""}`),
+				EventPayload: []byte(`{"testKey":"testValue"}`),
+				UserID:       "a-292e-4e79-9880-f8009e0ae4a3",
+				UUID:         uuid.Must(uuid.NewV4()),
+				CustomVal:    customVal,
+				EventCount:   1,
+			}
+		}
+		return js
+	}
+
+	// adding mock jobs to jobsDB
+	jobs := generateJobs(2)
+	err = jobsDB.Store(context.Background(), jobs)
+	require.NoError(t, err)
+
+	// triggerAddNewDS to trigger jobsDB to add new DS
+	triggerAddNewDS <- time.Now()
+	require.Eventually(
+		t,
+		func() bool {
+			return len(jobsDB.getDSList()) == 2
+		},
+		time.Second*5, time.Millisecond,
+		"expected number of tables to be 2")
+	ds := jobsDB.getDSList()
+	sqlStatement := fmt.Sprintf(`INSERT INTO %q (uuid, user_id, custom_val, parameters, event_payload, workspace_id)
+	                                   VALUES ($1, $2, $3, $4, $5, $6) RETURNING job_id`, ds[0].JobTable)
+	stmt, err := jobsDB.dbHandle.Prepare(sqlStatement)
+	require.NoError(t, err)
+	defer stmt.Close()
+	_, err = stmt.Exec(jobs[0].UUID, jobs[0].UserID, jobs[0].CustomVal, string(jobs[0].Parameters), string(jobs[0].EventPayload), jobs[0].WorkspaceId)
+	require.Error(t, err, "expected error as trigger is set on DS")
+	require.Equal(t, "pq: lockTableInsertException", err.Error())
+	var e *pq.Error
+	errors.As(err, &e)
+	fmt.Printf("error message: %+v", e.Message)
+	fmt.Printf("error message: %+v", e.Code)
 }
