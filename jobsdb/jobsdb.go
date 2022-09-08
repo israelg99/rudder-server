@@ -64,6 +64,8 @@ const (
 	postgresDuplicateFuncErr         = "42723"
 )
 
+var ErrTableReadOnly = errors.New("table is readonly")
+
 // backupSettings is for capturing the backup
 // configuration from the config/env files to
 // instantiate jobdb correctly
@@ -210,14 +212,14 @@ type JobsDB interface {
 	StoreInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) error
 
 	// StoreWithRetryEach tries to store all the provided jobs to the database and returns the job uuids which failed
-	StoreWithRetryEach(ctx context.Context, jobList []*JobT) map[uuid.UUID]string
+	StoreWithRetryEach(ctx context.Context, jobList []*JobT) (map[uuid.UUID]string, error)
 
 	// StoreWithRetryEachInTx tries to store all the provided jobs to the database and returns the job uuids which failed, using an existing transaction.
 	// Please ensure that you are using an StoreSafeTx, e.g.
 	//    jobsdb.WithStoreSafeTx(func(tx StoreSafeTx) error {
 	//	      jobsdb.StoreWithRetryEachInTx(ctx, tx, jobList)
 	//    })
-	StoreWithRetryEachInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) map[uuid.UUID]string
+	StoreWithRetryEachInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) (map[uuid.UUID]string, error)
 
 	// WithUpdateSafeTx prepares an update-safe environment and then starts a transaction
 	// that can be used by the provided function. An update-safe transaction shall be used if the provided function
@@ -2051,8 +2053,17 @@ func (jd *HandleT) WithStoreSafeTx(f func(tx StoreSafeTx) error) error {
 func (jd *HandleT) inStoreSafeCtx(f func() error) error {
 	// Only locks the list
 	jd.dsListLock.RLock()
-	defer jd.dsListLock.RUnlock()
-	return f()
+	err := f()
+	jd.dsListLock.RUnlock()
+
+	// If our ds list is out of date then refresh it and repeat the operation
+	if err != nil && errors.Is(err, ErrTableReadOnly) {
+		jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
+			jd.refreshDSList(l)
+		})
+		return jd.inStoreSafeCtx(f)
+	}
+	return err
 }
 
 func (jd *HandleT) WithUpdateSafeTx(f func(tx UpdateSafeTx) error) error {
@@ -2108,7 +2119,7 @@ func (jd *HandleT) clearCache(ds dataSetT, jobList []*JobT) {
 	}
 }
 
-func (jd *HandleT) internalStoreWithRetryEachInTx(ctx context.Context, tx *sql.Tx, ds dataSetT, jobList []*JobT) (errorMessagesMap map[uuid.UUID]string) {
+func (jd *HandleT) internalStoreWithRetryEachInTx(ctx context.Context, tx *sql.Tx, ds dataSetT, jobList []*JobT) (errorMessagesMap map[uuid.UUID]string, errTableReadonly error) {
 	const (
 		savepointSql = "SAVEPOINT storeWithRetryEach"
 		rollbackSql  = "ROLLBACK TO " + savepointSql
@@ -2128,15 +2139,18 @@ func (jd *HandleT) internalStoreWithRetryEachInTx(ctx context.Context, tx *sql.T
 
 	_, err := tx.ExecContext(ctx, savepointSql)
 	if err != nil {
-		return failAll(err)
+		return failAll(err), nil
 	}
 	err = jd.internalStoreJobsInTx(ctx, tx, ds, jobList)
 	if err == nil {
 		return
 	}
+	if errors.Is(err, ErrTableReadOnly) {
+		return nil, err
+	}
 	_, err = tx.ExecContext(ctx, rollbackSql)
 	if err != nil {
-		return failAll(err)
+		return failAll(err), nil
 	}
 	jd.logger.Errorf("Copy In command failed with error %v", err)
 	errorMessagesMap = make(map[uuid.UUID]string)
@@ -2159,6 +2173,9 @@ func (jd *HandleT) internalStoreWithRetryEachInTx(ctx context.Context, tx *sql.T
 		// try to store
 		err := jd.storeJob(ctx, tx, ds, job)
 		if err != nil {
+			if errors.Is(err, ErrTableReadOnly) {
+				return nil, err
+			}
 			errorMessagesMap[job.UUID] = err.Error()
 			// rollback to savepoint
 			_, txErr = tx.ExecContext(ctx, rollbackSql)
@@ -2383,14 +2400,7 @@ func (jd *HandleT) doStoreJobsInTx(ctx context.Context, tx *sql.Tx, ds dataSetT,
 	if err != nil && errors.As(err, &e) {
 
 		if e.Code == lockTableInsertExceptionCode {
-			var updatedList []dataSetT
-			jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
-				updatedList = jd.refreshDSList(l)
-			})
-			ds = updatedList[len(updatedList)-1]
-			if err = store(); err != nil {
-				_ = errors.As(err, &e)
-			}
+			return ErrTableReadOnly
 		}
 
 		if _, ok := dbInvalidJsonErrors[string(e.Code)]; ok {
@@ -2407,40 +2417,33 @@ func (jd *HandleT) doStoreJobsInTx(ctx context.Context, tx *sql.Tx, ds dataSetT,
 }
 
 func (jd *HandleT) storeJob(ctx context.Context, tx *sql.Tx, ds dataSetT, job *JobT) (err error) {
-	storeEach := func() error {
-		sqlStatement := fmt.Sprintf(`INSERT INTO %q (uuid, user_id, custom_val, parameters, event_payload, workspace_id)
+	sqlStatement := fmt.Sprintf(`INSERT INTO %q (uuid, user_id, custom_val, parameters, event_payload, workspace_id)
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING job_id`, ds.JobTable)
-		stmt, err := tx.PrepareContext(ctx, sqlStatement)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		job.sanitizeJson()
-		_, err = stmt.ExecContext(ctx, job.UUID, job.UserID, job.CustomVal, string(job.Parameters), string(job.EventPayload), job.WorkspaceId)
+	stmt, err := tx.PrepareContext(ctx, sqlStatement)
+	if err != nil {
 		return err
 	}
+	defer stmt.Close()
+	job.sanitizeJson()
+	_, err = stmt.ExecContext(ctx, job.UUID, job.UserID, job.CustomVal, string(job.Parameters), string(job.EventPayload), job.WorkspaceId)
+	if err == nil {
 
-	var e *pq.Error
-	if err != nil && errors.As(err, &e) {
-		if e.Code == lockTableInsertExceptionCode {
-			var updatedList []dataSetT
-			jd.dsListLock.WithLock(func(l lock.DSListLockToken) {
-				updatedList = jd.refreshDSList(l)
-			})
-			ds = updatedList[len(updatedList)-1]
-			if err = storeEach(); err != nil {
-				_ = errors.As(err, &e)
-			}
+		// Empty customValFilters means we want to clear for all
+		jd.markClearEmptyResult(ds, allWorkspaces, []string{}, []string{}, nil, hasJobs, nil)
+		jd.markClearEmptyResult(ds, job.WorkspaceId, []string{}, []string{}, nil, hasJobs, nil)
+		// fmt.Println("Bursting CACHE")
+		return
+
+	}
+	if pqErr, ok := err.(*pq.Error); ok {
+		errCode := string(pqErr.Code)
+		if errCode == lockTableInsertExceptionCode {
+			return ErrTableReadOnly
 		}
-		errCode := string(e.Code)
 		if _, ok := dbInvalidJsonErrors[errCode]; ok {
 			return errors.New("invalid JSON")
 		}
 	}
-
-	// Empty customValFilters means we want to clear for all
-	jd.markClearEmptyResult(ds, allWorkspaces, []string{}, []string{}, nil, hasJobs, nil)
-	jd.markClearEmptyResult(ds, job.WorkspaceId, []string{}, []string{}, nil, hasJobs, nil)
 	return
 }
 
@@ -4248,33 +4251,35 @@ func (jd *HandleT) StoreInTx(ctx context.Context, tx StoreSafeTx, jobList []*Job
 	return storeCmd()
 }
 
-func (jd *HandleT) StoreWithRetryEach(ctx context.Context, jobList []*JobT) map[uuid.UUID]string {
+func (jd *HandleT) StoreWithRetryEach(ctx context.Context, jobList []*JobT) (map[uuid.UUID]string, error) {
 	var res map[uuid.UUID]string
-	_ = jd.WithStoreSafeTx(func(tx StoreSafeTx) error {
-		res = jd.StoreWithRetryEachInTx(ctx, tx, jobList)
-		return nil
+	err := jd.WithStoreSafeTx(func(tx StoreSafeTx) error {
+		var err error
+		res, err = jd.StoreWithRetryEachInTx(ctx, tx, jobList)
+		return err
 	})
-	return res
+	return res, err
 }
 
-func (jd *HandleT) StoreWithRetryEachInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) map[uuid.UUID]string {
+func (jd *HandleT) StoreWithRetryEachInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) (map[uuid.UUID]string, error) {
 	var res map[uuid.UUID]string
+	var err error
 	storeCmd := func() error {
 		command := func() interface{} {
 			dsList := jd.getDSList()
-			res = jd.internalStoreWithRetryEachInTx(ctx, tx.Tx(), dsList[len(dsList)-1], jobList)
+			res, err = jd.internalStoreWithRetryEachInTx(ctx, tx.Tx(), dsList[len(dsList)-1], jobList)
 			return res
 		}
-		res, _ = jd.executeDbRequest(newWriteDbRequest("store_retry_each", nil, command)).(map[uuid.UUID]string)
+		_ = jd.executeDbRequest(newWriteDbRequest("store_retry_each", nil, command))
 		return nil
 	}
 
 	if tx.storeSafeTxIdentifier() != jd.Identifier() {
 		_ = jd.inStoreSafeCtx(storeCmd)
-		return res
+		return res, err
 	}
 	_ = storeCmd()
-	return res
+	return res, err
 }
 
 /*

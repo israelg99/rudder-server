@@ -1150,7 +1150,7 @@ func TestJobsDB_IncompatiblePayload(t *testing.T) {
 		WorkspaceId:  defaultWorkspaceID,
 		EventCount:   1,
 	}
-	errMap := jobDB.StoreWithRetryEach(context.Background(), []*JobT{&sampleTestJob})
+	errMap, _ := jobDB.StoreWithRetryEach(context.Background(), []*JobT{&sampleTestJob})
 	for _, val := range errMap {
 		require.Equal(t, "", val)
 	}
