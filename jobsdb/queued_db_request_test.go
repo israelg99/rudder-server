@@ -16,12 +16,12 @@ func Test_executeDbRequest_read_direct(t *testing.T) {
 
 	h := HandleT{}
 
-	res := h.executeDbRequest(&dbRequest{
+	res := executeDbRequest(&h, &dbRequest[string]{
 		reqType: readReqType,
 		name:    "test",
 		tags:    nil,
-		command: func() interface{} { return expected },
-	}).(string)
+		command: func() string { return expected },
+	})
 
 	require.Equal(t, expected, res, "Unexpected result")
 }
@@ -33,12 +33,12 @@ func Test_executeDbRequest_read_channel(t *testing.T) {
 		enableReaderQueue: true,
 		readCapacity:      make(chan struct{}, 1),
 	}
-	res := h.executeDbRequest(&dbRequest{
+	res := executeDbRequest(&h, &dbRequest[string]{
 		reqType: readReqType,
 		name:    "test",
 		tags:    nil,
-		command: func() interface{} { return expected },
-	}).(string)
+		command: func() string { return expected },
+	})
 
 	require.Equal(t, expected, res, "Unexpected result")
 }
@@ -48,12 +48,12 @@ func Test_executeDbRequest_write_direct(t *testing.T) {
 
 	h := HandleT{}
 
-	res := h.executeDbRequest(&dbRequest{
+	res := executeDbRequest(&h, &dbRequest[string]{
 		reqType: writeReqType,
 		name:    "test",
 		tags:    nil,
-		command: func() interface{} { return expected },
-	}).(string)
+		command: func() string { return expected },
+	})
 
 	require.Equal(t, expected, res, "Unexpected result")
 }
@@ -65,12 +65,12 @@ func Test_executeDbRequest_write_channel(t *testing.T) {
 		enableWriterQueue: true,
 		writeCapacity:     make(chan struct{}, 1),
 	}
-	res := h.executeDbRequest(&dbRequest{
+	res := executeDbRequest(&h, &dbRequest[string]{
 		reqType: writeReqType,
 		name:    "test",
 		tags:    nil,
-		command: func() interface{} { return expected },
-	}).(string)
+		command: func() string { return expected },
+	})
 
 	require.Equal(t, expected, res, "Unexpected result")
 }

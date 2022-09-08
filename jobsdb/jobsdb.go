@@ -303,10 +303,10 @@ func (jd *HandleT) UpdateJobStatusInTx(ctx context.Context, tx UpdateSafeTx, sta
 			return nil
 		}
 		tags := statTags{CustomValFilters: customValFilters, ParameterFilters: parameterFilters}
-		command := func() interface{} {
+		command := func() error {
 			return jd.internalUpdateJobStatusInTx(ctx, tx.Tx(), statusList, customValFilters, parameterFilters)
 		}
-		err, _ := jd.executeDbRequest(newWriteDbRequest("update_job_status", &tags, command)).(error)
+		err := executeDbRequest(jd, newWriteDbRequest("update_job_status", &tags, command))
 		return err
 	}
 
@@ -4236,12 +4236,12 @@ func (jd *HandleT) Store(ctx context.Context, jobList []*JobT) error {
 // If enableWriterQueue is true, this goes through writer worker pool.
 func (jd *HandleT) StoreInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) error {
 	storeCmd := func() error {
-		command := func() interface{} {
+		command := func() error {
 			dsList := jd.getDSList()
 			err := jd.internalStoreJobsInTx(ctx, tx.Tx(), dsList[len(dsList)-1], jobList)
 			return err
 		}
-		err, _ := jd.executeDbRequest(newWriteDbRequest("store", nil, command)).(error)
+		err := executeDbRequest(jd, newWriteDbRequest("store", nil, command))
 		return err
 	}
 
@@ -4263,22 +4263,21 @@ func (jd *HandleT) StoreWithRetryEach(ctx context.Context, jobList []*JobT) (map
 
 func (jd *HandleT) StoreWithRetryEachInTx(ctx context.Context, tx StoreSafeTx, jobList []*JobT) (map[uuid.UUID]string, error) {
 	var res map[uuid.UUID]string
-	var err error
 	storeCmd := func() error {
-		command := func() interface{} {
+		command := func() tuple2[map[uuid.UUID]string, error] {
 			dsList := jd.getDSList()
-			res, err = jd.internalStoreWithRetryEachInTx(ctx, tx.Tx(), dsList[len(dsList)-1], jobList)
-			return res
+			return tuple2Wrapper(jd.internalStoreWithRetryEachInTx(ctx, tx.Tx(), dsList[len(dsList)-1], jobList))
 		}
-		_ = jd.executeDbRequest(newWriteDbRequest("store_retry_each", nil, command))
-		return nil
+		tuple := executeDbRequest(jd, newWriteDbRequest("store_retry_each", nil, command))
+		res = tuple.v1
+		return tuple.v2
 	}
 
 	if tx.storeSafeTxIdentifier() != jd.Identifier() {
-		_ = jd.inStoreSafeCtx(storeCmd)
+		err := jd.inStoreSafeCtx(storeCmd)
 		return res, err
 	}
-	_ = storeCmd()
+	err := storeCmd()
 	return res, err
 }
 
@@ -4307,11 +4306,11 @@ func (jd *HandleT) GetUnprocessed(ctx context.Context, params GetQueryParamsT) (
 	}
 
 	tags := statTags{CustomValFilters: params.CustomValFilters, ParameterFilters: params.ParameterFilters}
-	command := func() interface{} {
-		return queryResultWrapper(jd.getUnprocessed(ctx, params))
+	command := func() tuple2[JobsResult, error] {
+		return tuple2Wrapper(jd.getUnprocessed(ctx, params))
 	}
-	res, _ := jd.executeDbRequest(newReadDbRequest("unprocessed", &tags, command)).(queryResult)
-	return res.JobsResult, res.err
+	res := executeDbRequest(jd, newReadDbRequest("unprocessed", &tags, command))
+	return res.v1, res.v2
 }
 
 /*
@@ -4383,11 +4382,11 @@ func (jd *HandleT) GetImporting(ctx context.Context, params GetQueryParamsT) (Jo
 	}
 	params.StateFilters = []string{Importing.State}
 	tags := statTags{CustomValFilters: params.CustomValFilters, StateFilters: params.StateFilters, ParameterFilters: params.ParameterFilters}
-	command := func() interface{} {
-		return queryResultWrapper(jd.getImportingList(ctx, params))
+	command := func() tuple2[JobsResult, error] {
+		return tuple2Wrapper(jd.getImportingList(ctx, params))
 	}
-	res, _ := jd.executeDbRequest(newReadDbRequest("importing", &tags, command)).(queryResult)
-	return res.JobsResult, res.err
+	res := executeDbRequest(jd, newReadDbRequest("importing", &tags, command))
+	return res.v1, res.v2
 }
 
 /*
@@ -4585,15 +4584,15 @@ func (jd *HandleT) GetProcessed(ctx context.Context, params GetQueryParamsT) (Jo
 	return completeProcessedJobs, nil
 }
 
-type queryResult struct {
-	JobsResult
-	err error
+type tuple2[T1 any, T2 any] struct {
+	v1 T1
+	v2 T2
 }
 
-func queryResultWrapper(res JobsResult, err error) queryResult {
-	return queryResult{
-		JobsResult: res,
-		err:        err,
+func tuple2Wrapper[T1 any, T2 any](v1 T1, v2 T2) tuple2[T1, T2] {
+	return tuple2[T1, T2]{
+		v1: v1,
+		v2: v2,
 	}
 }
 
@@ -4607,11 +4606,11 @@ func (jd *HandleT) GetToRetry(ctx context.Context, params GetQueryParamsT) (Jobs
 	}
 	params.StateFilters = []string{Failed.State}
 	tags := statTags{CustomValFilters: params.CustomValFilters, StateFilters: params.StateFilters, ParameterFilters: params.ParameterFilters}
-	command := func() interface{} {
-		return queryResultWrapper(jd.getToRetry(ctx, params))
+	command := func() tuple2[JobsResult, error] {
+		return tuple2Wrapper(jd.getToRetry(ctx, params))
 	}
-	res, _ := jd.executeDbRequest(newReadDbRequest("processed", &tags, command)).(queryResult)
-	return res.JobsResult, res.err
+	res := executeDbRequest(jd, newReadDbRequest("processed", &tags, command))
+	return res.v1, res.v2
 }
 
 /*
@@ -4632,11 +4631,11 @@ func (jd *HandleT) GetWaiting(ctx context.Context, params GetQueryParamsT) (Jobs
 	}
 	params.StateFilters = []string{Waiting.State}
 	tags := statTags{CustomValFilters: params.CustomValFilters, StateFilters: params.StateFilters, ParameterFilters: params.ParameterFilters}
-	command := func() interface{} {
-		return queryResultWrapper(jd.getWaiting(ctx, params))
+	command := func() tuple2[JobsResult, error] {
+		return tuple2Wrapper(jd.getWaiting(ctx, params))
 	}
-	res, _ := jd.executeDbRequest(newReadDbRequest("processed", &tags, command)).(queryResult)
-	return res.JobsResult, res.err
+	res := executeDbRequest(jd, newReadDbRequest("processed", &tags, command))
+	return res.v1, res.v2
 }
 
 /*
@@ -4653,11 +4652,11 @@ func (jd *HandleT) GetExecuting(ctx context.Context, params GetQueryParamsT) (Jo
 	}
 	params.StateFilters = []string{Executing.State}
 	tags := statTags{CustomValFilters: params.CustomValFilters, StateFilters: params.StateFilters, ParameterFilters: params.ParameterFilters}
-	command := func() interface{} {
-		return queryResultWrapper(jd.getExecuting(ctx, params))
+	command := func() tuple2[JobsResult, error] {
+		return tuple2Wrapper(jd.getExecuting(ctx, params))
 	}
-	res, _ := jd.executeDbRequest(newReadDbRequest("processed", &tags, command)).(queryResult)
-	return res.JobsResult, res.err
+	res := executeDbRequest(jd, newReadDbRequest("processed", &tags, command))
+	return res.v1, res.v2
 }
 
 /*
@@ -4676,11 +4675,11 @@ func (jd *HandleT) DeleteExecuting() {
 		StateFilters: []string{Executing.State},
 	}
 	tags := statTags{CustomValFilters: conditions.CustomValFilters, StateFilters: conditions.StateFilters, ParameterFilters: conditions.ParameterFilters}
-	command := func() interface{} {
+	command := func() error {
 		jd.deleteJobStatus(conditions)
 		return nil
 	}
-	_ = jd.executeDbRequest(newWriteDbRequest("delete_job_status", &tags, command))
+	_ = executeDbRequest(jd, newWriteDbRequest("delete_job_status", &tags, command))
 }
 
 /*

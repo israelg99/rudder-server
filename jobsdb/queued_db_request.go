@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-func (jd *HandleT) executeDbRequest(c *dbRequest) interface{} {
+func executeDbRequest[T any](jd *HandleT, c *dbRequest[T]) T {
 	totalTimeStat := jd.getTimerStat(fmt.Sprintf("%s_total_time", c.name), c.tags)
 	totalTimeStat.Start()
 	defer totalTimeStat.End()
@@ -43,15 +43,15 @@ const (
 	writeReqType
 )
 
-type dbRequest struct {
+type dbRequest[T any] struct {
 	reqType dbReqType
 	name    string
 	tags    *statTags
-	command func() interface{}
+	command func() T
 }
 
-func newReadDbRequest(name string, tags *statTags, command func() interface{}) *dbRequest {
-	return &dbRequest{
+func newReadDbRequest[T any](name string, tags *statTags, command func() T) *dbRequest[T] {
+	return &dbRequest[T]{
 		reqType: readReqType,
 		name:    name,
 		tags:    tags,
@@ -59,8 +59,8 @@ func newReadDbRequest(name string, tags *statTags, command func() interface{}) *
 	}
 }
 
-func newWriteDbRequest(name string, tags *statTags, command func() interface{}) *dbRequest {
-	return &dbRequest{
+func newWriteDbRequest[T any](name string, tags *statTags, command func() T) *dbRequest[T] {
+	return &dbRequest[T]{
 		reqType: writeReqType,
 		name:    name,
 		tags:    tags,
