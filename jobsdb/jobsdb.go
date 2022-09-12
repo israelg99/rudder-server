@@ -2007,6 +2007,7 @@ func (jd *HandleT) postMigrateHandleDS(l lock.DSListLockToken, migrateFrom []dat
 }
 
 func (jd *HandleT) internalStoreJobsInTx(ctx context.Context, tx *sql.Tx, ds dataSetT, jobList []*JobT) error {
+	jd.logger.Infof("CACHE::: [%s] Storing %d jobs in %s", jd.tablePrefix, len(jobList), ds.JobTable)
 	queryStat := jd.getTimerStat("store_jobs", nil)
 	queryStat.Start()
 	defer queryStat.End()
@@ -2480,6 +2481,7 @@ func (jd *HandleT) markClearEmptyResult(ds dataSetT, workspace string, stateFilt
 	// results is not important
 	if len(stateFilters) == 0 || len(customValFilters) == 0 {
 		if value == hasJobs || value == dropDSFromCache {
+			jd.logger.Infof("CACHE::: [%s] Invalid cache value provided for dataset: %s", jd.tablePrefix, ds)
 			delete(jd.dsEmptyResultCache, ds)
 		}
 		return
@@ -2526,6 +2528,7 @@ func (jd *HandleT) markClearEmptyResult(ds dataSetT, workspace string, stateFilt
 						Value: value,
 						T:     time.Now(),
 					}
+					jd.logger.Infof("CACHE::: [%s] Setting cache for %s %s %s %s %s %s", jd.tablePrefix, ds, workspace, cVal, pf, st, value)
 					jd.dsEmptyResultCache[ds][workspace][cVal][pf][st] = cache
 				}
 			}
@@ -2546,6 +2549,8 @@ func (jd *HandleT) isEmptyResult(ds dataSetT, workspace string, stateFilters, cu
 	defer queryStat.End()
 	jd.dsCacheLock.Lock()
 	defer jd.dsCacheLock.Unlock()
+
+	jd.logger.Infof("CACHE::: [%s] Checking cache for %s %s %v %v %v", jd.tablePrefix, ds, workspace, customValFilters, parameterFilters, stateFilters)
 
 	_, ok := jd.dsEmptyResultCache[ds]
 	if !ok {
@@ -4091,6 +4096,7 @@ customValFilters[] is passed, so we can efficiently mark empty cache
 Later we can move this to query
 */
 func (jd *HandleT) internalUpdateJobStatusInTx(ctx context.Context, tx *sql.Tx, statusList []*JobStatusT, customValFilters []string, parameterFilters []ParameterFilterT) error {
+	jd.logger.Infof("CACHE::: [%s] Updating %d jobs", jd.tablePrefix, len(statusList))
 	// capture stats
 	tags := statTags{CustomValFilters: customValFilters, ParameterFilters: parameterFilters}
 	queryStat := jd.getTimerStat("update_job_status_time", &tags)
@@ -4280,6 +4286,7 @@ those whose state hasn't been marked in the DB.
 If enableReaderQueue is true, this goes through worker pool, else calls getUnprocessed directly.
 */
 func (jd *HandleT) GetUnprocessed(ctx context.Context, params GetQueryParamsT) (JobsResult, error) { // skipcq: CRT-P0003
+	jd.logger.Infof("CACHE::: [%s] Getting unprocessed jobs: %v", jd.tablePrefix, params)
 	if params.JobsLimit <= 0 {
 		return JobsResult{}, nil
 	}
@@ -4580,6 +4587,7 @@ GetToRetry returns events which need to be retried.
 If enableReaderQueue is true, this goes through worker pool, else calls getUnprocessed directly.
 */
 func (jd *HandleT) GetToRetry(ctx context.Context, params GetQueryParamsT) (JobsResult, error) { // skipcq: CRT-P0003
+	jd.logger.Infof("CACHE::: [%s] Getting to retry jobs: %v", jd.tablePrefix, params)
 	if params.JobsLimit == 0 {
 		return JobsResult{}, nil
 	}
@@ -4605,6 +4613,7 @@ GetWaiting returns events which are under processing
 If enableReaderQueue is true, this goes through worker pool, else calls getUnprocessed directly.
 */
 func (jd *HandleT) GetWaiting(ctx context.Context, params GetQueryParamsT) (JobsResult, error) { // skipcq: CRT-P0003
+	jd.logger.Infof("CACHE::: [%s] Getting waiting jobs: %v", jd.tablePrefix, params)
 	if params.JobsLimit == 0 {
 		return JobsResult{}, nil
 	}
