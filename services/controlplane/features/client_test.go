@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rudderlabs/rudder-server/services/controlplane/features"
 	"github.com/rudderlabs/rudder-server/services/controlplane/identity"
-	"github.com/stretchr/testify/require"
 )
 
 func Test_Client_Send(t *testing.T) {
@@ -94,7 +96,6 @@ func Test_Client_Send(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		t.Skip("test is too slow")
 		count := int64(0)
 
 		blocker := make(chan struct{})
@@ -106,7 +107,10 @@ func Test_Client_Send(t *testing.T) {
 		defer s.Close()
 		defer close(blocker)
 
-		c := features.New(&identity.Namespace{}, features.WithHTTPClient(s.Client()), features.WithURL(s.URL), features.WithTimeout(time.Millisecond))
+		c := features.New(&identity.Namespace{},
+			features.WithHTTPClient(s.Client()), features.WithURL(s.URL),
+			features.WithTimeout(time.Millisecond),
+			features.WithBackoffStrategy(backoff.NewConstantBackOff(time.Millisecond)))
 
 		err := c.Send(context.Background(), features.PerComponent{
 			"test": {"feature1", "feature2"},

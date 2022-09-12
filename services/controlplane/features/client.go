@@ -13,13 +13,15 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff"
+
 	"github.com/rudderlabs/rudder-server/config"
 	"github.com/rudderlabs/rudder-server/services/controlplane/identity"
 )
 
 var (
-	DefaultTimeout = 30 * time.Second
-	MaxRetries     = uint64(3)
+	DefaultTimeout                         = 30 * time.Second
+	MaxRetries                             = uint64(3)
+	defaultBackoffStrategy backoff.BackOff = backoff.NewExponentialBackOff()
 )
 
 type OptFn func(c *Client)
@@ -42,11 +44,18 @@ func WithTimeout(timeout time.Duration) OptFn {
 	}
 }
 
+func WithBackoffStrategy(backoffStrategy backoff.BackOff) OptFn {
+	return func(c *Client) {
+		c.backoffStrategy = backoffStrategy
+	}
+}
+
 type Client struct {
-	client   *http.Client
-	ua       string
-	url      string
-	identity identity.Identifier
+	client          *http.Client
+	ua              string
+	url             string
+	identity        identity.Identifier
+	backoffStrategy backoff.BackOff
 }
 
 type payload struct {
@@ -116,7 +125,11 @@ func (c *Client) Send(ctx context.Context, components PerComponent) error {
 		return err
 	}
 
-	backoffWithMaxRetry := backoff.WithContext(backoff.WithMaxRetries(backoff.NewExponentialBackOff(), MaxRetries), ctx)
+	backoffStrategy := defaultBackoffStrategy
+	if c.backoffStrategy != nil {
+		backoffStrategy = c.backoffStrategy
+	}
+	backoffWithMaxRetry := backoff.WithContext(backoff.WithMaxRetries(backoffStrategy, MaxRetries), ctx)
 	return backoff.Retry(func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
