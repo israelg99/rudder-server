@@ -149,19 +149,11 @@ func (processor *ProcessorApp) StartRudderCore(ctx context.Context, options *app
 	)
 	var tenantRouterDB jobsdb.MultiTenantJobsDB
 	var multitenantStats multitenant.MultiTenantI
-	if misc.UseFairPickup() {
-		tenantRouterDB = &jobsdb.MultiTenantHandleT{HandleT: routerDB}
-		multitenantStats = multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		})
-	} else {
-		tenantRouterDB = &jobsdb.MultiTenantLegacy{HandleT: routerDB}
-		multitenantStats = multitenant.WithLegacyPickupJobs(multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		}))
-	}
+	tenantRouterDB = &jobsdb.MultiTenantHandleT{HandleT: routerDB}
+	multitenantStats = multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
+		"rt":       tenantRouterDB,
+		"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
+	})
 
 	var modeProvider cluster.ChangeEventProvider
 

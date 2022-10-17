@@ -51,7 +51,7 @@ type reporter interface {
 
 type tenantStats interface {
 	CalculateSuccessFailureCounts(workspace, destType string, isSuccess, isDrained bool)
-	GetRouterPickupJobs(destType string, noOfWorkers int, routerTimeOut time.Duration, jobQueryBatchSize int, timeGained float64) (map[string]int, map[string]float64)
+	GetRouterPickupJobs(destType string, noOfWorkers int, routerTimeOut time.Duration, jobQueryBatchSize int, timeGained float64) map[string]int
 	ReportProcLoopAddStats(stats map[string]map[string]int, tableType string)
 	UpdateWorkspaceLatencyMap(destType, workspaceID string, val float64)
 }
@@ -1787,7 +1787,7 @@ func (rt *HandleT) readAndProcess() int {
 
 	rt.lastQueryRunTime = time.Now()
 
-	pickupMap, _ := rt.MultitenantI.GetRouterPickupJobs(rt.destName, rt.noOfWorkers, timeOut, jobQueryBatchSize, rt.timeGained)
+	pickupMap := rt.MultitenantI.GetRouterPickupJobs(rt.destName, rt.noOfWorkers, timeOut, jobQueryBatchSize, rt.timeGained)
 	totalPickupCount := 0
 	for _, pickup := range pickupMap {
 		if pickup > 0 {
