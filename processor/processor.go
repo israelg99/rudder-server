@@ -1605,6 +1605,7 @@ func (proc *HandleT) Store(in *storeMessage) {
 				processorLoopStats["batch_router"][batchDestJobs[i].WorkspaceId] = make(map[string]int)
 			}
 			processorLoopStats["batch_router"][batchDestJobs[i].WorkspaceId][batchDestJobs[i].CustomVal] += 1
+			processorLoopStats["batch_router"][batchDestJobs[i].WorkspaceId][gjson.GetBytes(batchDestJobs[i].Parameters, "destination_id").Str] += 1
 			totalPayloadBatchBytes += len(batchDestJobs[i].EventPayload)
 		}
 		proc.multitenantI.ReportProcLoopAddStats(processorLoopStats["batch_router"], "batch_rt")
@@ -1644,6 +1645,7 @@ func (proc *HandleT) Store(in *storeMessage) {
 				processorLoopStats["router"][destJobs[i].WorkspaceId] = make(map[string]int)
 			}
 			processorLoopStats["router"][destJobs[i].WorkspaceId][destJobs[i].CustomVal] += 1
+			processorLoopStats["router"][destJobs[i].WorkspaceId][gjson.GetBytes(destJobs[i].Parameters, "destination_id").Str] += 1
 			totalPayloadRouterBytes += len(destJobs[i].EventPayload)
 		}
 		proc.multitenantI.ReportProcLoopAddStats(processorLoopStats["router"], "rt")

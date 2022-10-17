@@ -1370,10 +1370,6 @@ func ReverseInt(s []int) []int {
 	return s
 }
 
-func UseFairPickup() bool {
-	return config.GetBool("JobsDB.fairPickup", false) || config.GetBool("EnableMultitenancy", false)
-}
-
 // lookup map recursively and return value
 func MapLookup(mapToLookup map[string]interface{}, keys ...string) interface{} {
 	if len(keys) == 0 {
