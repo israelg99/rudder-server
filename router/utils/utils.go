@@ -53,7 +53,7 @@ func loadConfig() {
 }
 
 func getRetentionTimeForDestination(destID string) time.Duration {
-	if config.IsSet("Router." + destID + ".jobRetention") {
+	if config.IsSet("Router." + destID + "") {
 		return config.GetDuration("Router."+destID+".jobRetention", 720, time.Hour)
 	}
 
