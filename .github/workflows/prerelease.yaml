@@ -1,11 +1,10 @@
 on:
   push:
     branches:
-      - "master"
-      - "release/*"
-name: release-please
+      - "rc/*"
+name: prerelease
 jobs:
-  release:
+  prerelease:
     runs-on: ubuntu-latest
     steps:
       - name: Extract branch name
@@ -15,10 +14,12 @@ jobs:
       - uses: google-github-actions/release-please-action@v3
         with:
           token: ${{ secrets.GH_PAT }}
-          pull-request-title-pattern: "chore: release ${version}"
+          pull-request-title-pattern: "chore: prerelease ${version}"
           release-type: go
           package-name: rudder-server
           default-branch: ${{ steps.extract_branch.outputs.branch }}
           changelog-types: '[{"type":"feat","section":"Features","hidden":false},{"type":"fix","section":"Bug Fixes","hidden":false},{"type":"chore","section":"Miscellaneous","hidden":false},{"type":"refactor","section":"Miscellaneous","hidden":false},{"type":"test","section":"Miscellaneous","hidden":false},{"type":"doc","section":"Documentation","hidden":false}]'
           bump-minor-pre-major: true
- 
+          prerelease: true
+          pre-release: rc
+
