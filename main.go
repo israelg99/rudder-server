@@ -199,15 +199,15 @@ func runAllInit() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	exitCode := Run(ctx)
+	exitCode := Run(ctx, os.Args)
 	cancel()
 	os.Exit(exitCode)
 }
 
-func Run(ctx context.Context) int {
+func Run(ctx context.Context, args []string) int {
 	runAllInit()
 
-	options := app.LoadOptions()
+	options := app.LoadOptions(args)
 	if options.VersionFlag {
 		printVersion()
 		return 0

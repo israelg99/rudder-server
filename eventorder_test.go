@@ -160,7 +160,7 @@ func TestEventOrderGuarantee(t *testing.T) {
 				}
 			}
 		}()
-		c := main.Run(ctx)
+		c := main.Run(ctx, []string{"main"})
 		t.Logf("server stopped: %d", c)
 		if c != 0 {
 			t.Errorf("server exited with a non-0 exit code: %d", c)
