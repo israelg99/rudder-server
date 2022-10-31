@@ -184,8 +184,8 @@ func (b *Repository) start() error {
 		DefaultOptions(b.path).
 		WithLogger(blogger{b.log}).
 		WithCompression(options.None).
-		WithNumMemtables(2).
-		WithMemTableSize(32 << 20).
+		// WithNumMemtables(2).
+		// WithMemTableSize(64 << 20).
 		WithNumLevelZeroTables(5).
 		WithNumLevelZeroTablesStall(10).
 		WithIndexCacheSize(16 << 20).
